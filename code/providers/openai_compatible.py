@@ -180,6 +180,8 @@ class OpenAICompatibleProvider:
 
         try:
             data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("response JSON is not an object")
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices:
                 raise ValueError("missing choices")

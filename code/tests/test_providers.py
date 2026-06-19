@@ -12,7 +12,7 @@ from schemas import PreparedImage, PredictionContext
 class FakeResponse:
     def __init__(self, status_code=200, payload=None, text=None, headers=None):
         self.status_code = status_code
-        self._payload = payload or {}
+        self._payload = {} if payload is None else payload
         self.text = text if text is not None else json.dumps(self._payload)
         self.headers = headers or {}
 
@@ -200,6 +200,8 @@ def test_openai_compatible_returns_network_error_metadata(monkeypatch):
 @pytest.mark.parametrize(
     "payload",
     [
+        [],
+        "not an object",
         {},
         {"choices": []},
         {"choices": [{"finish_reason": "stop", "message": {}}]},
@@ -378,6 +380,8 @@ def test_anthropic_returns_network_error_metadata(monkeypatch):
 @pytest.mark.parametrize(
     "payload",
     [
+        [],
+        "not an object",
         {},
         {"content": []},
         {"content": [{"type": "tool_use", "input": {}}]},

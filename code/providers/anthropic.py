@@ -108,6 +108,8 @@ class AnthropicProvider:
 
         try:
             data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("response JSON is not an object")
             content = data.get("content")
             if not isinstance(content, list) or not content:
                 raise ValueError("missing content")
