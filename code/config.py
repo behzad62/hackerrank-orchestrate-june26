@@ -30,6 +30,44 @@ def load_env_file(path: Path | None) -> None:
 
 
 @dataclass(frozen=True)
+class ProviderSpec:
+    provider: str
+    model: str
+
+
+def parse_provider_spec(raw: str) -> ProviderSpec:
+    provider, separator, model = raw.strip().partition(":")
+    if not separator or not provider.strip() or not model.strip():
+        raise ValueError(f"Invalid provider spec: {raw!r}")
+    return ProviderSpec(provider=provider.strip().lower(), model=model.strip())
+
+
+def parse_backup_chain(raw: str) -> tuple[ProviderSpec, ...]:
+    if not raw.strip():
+        return ()
+    return tuple(parse_provider_spec(part) for part in raw.split(",") if part.strip())
+
+
+def parse_model_prices(raw: str) -> dict[tuple[str, str], tuple[float, float]]:
+    prices: dict[tuple[str, str], tuple[float, float]] = {}
+    if not raw.strip():
+        return prices
+    for entry in raw.split(";"):
+        stripped = entry.strip()
+        if not stripped:
+            continue
+        key, separator, values = stripped.partition("=")
+        if not separator:
+            raise ValueError(f"Invalid model price entry: {entry!r}")
+        spec = parse_provider_spec(key)
+        input_price, value_separator, output_price = values.partition(",")
+        if not value_separator:
+            raise ValueError(f"Invalid model price values: {entry!r}")
+        prices[(spec.provider, spec.model)] = (float(input_price.strip()), float(output_price.strip()))
+    return prices
+
+
+@dataclass(frozen=True)
 class AppConfig:
     provider: str
     model: str
@@ -38,6 +76,8 @@ class AppConfig:
     retry_max_sleep_seconds: int = 8
     timeout_seconds: int = 90
     allow_no_vision_fallback: bool = True
+    allow_backup_vlm: bool = False
+    backup_chain: tuple[ProviderSpec, ...] = ()
     max_output_tokens: int = 1800
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
@@ -60,6 +100,8 @@ class AppConfig:
             retry_max_sleep_seconds=int(os.environ.get("VLM_RETRY_MAX_SLEEP_SECONDS", "8")),
             timeout_seconds=int(os.environ.get("VLM_TIMEOUT_SECONDS", "90")),
             allow_no_vision_fallback=_env_bool("ALLOW_NO_VISION_FALLBACK", True),
+            allow_backup_vlm=_env_bool("ALLOW_BACKUP_VLM", False),
+            backup_chain=parse_backup_chain(os.environ.get("VLM_BACKUP_CHAIN", "")),
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
             prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
             prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),

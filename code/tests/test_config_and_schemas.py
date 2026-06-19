@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from config import AppConfig
+from config import AppConfig, parse_model_prices
 from schemas import (
     ALLOWED_CLAIM_STATUS,
     ALLOWED_ISSUE_TYPES,
@@ -128,6 +128,32 @@ def test_config_reads_retry_and_gemini_generation_controls(monkeypatch, tmp_path
     assert cfg.retry_max_sleep_seconds == 45
     assert cfg.max_output_tokens == 4096
     assert cfg.gemini_thinking_level == "low"
+
+
+def test_config_reads_backup_chain(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALLOW_BACKUP_VLM", "true")
+    monkeypatch.setenv(
+        "VLM_BACKUP_CHAIN",
+        "openrouter:openai/gpt-4.1-mini,anthropic:claude-3-5-sonnet-latest",
+    )
+
+    cfg = AppConfig.from_env(repo_root=tmp_path)
+
+    assert cfg.allow_backup_vlm is True
+    assert [(spec.provider, spec.model) for spec in cfg.backup_chain] == [
+        ("openrouter", "openai/gpt-4.1-mini"),
+        ("anthropic", "claude-3-5-sonnet-latest"),
+    ]
+
+
+def test_parse_model_prices_uses_provider_model_keys():
+    prices = parse_model_prices(
+        "openrouter:qwen/qwen3.7-plus=0.32,1.28;"
+        "gemini:gemini-3.5-flash=1.50,9.00"
+    )
+
+    assert prices[("openrouter", "qwen/qwen3.7-plus")] == (0.32, 1.28)
+    assert prices[("gemini", "gemini-3.5-flash")] == (1.50, 9.00)
 
 
 def test_cli_overrides_env_paths(tmp_path):

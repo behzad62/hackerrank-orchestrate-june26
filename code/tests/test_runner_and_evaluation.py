@@ -173,7 +173,12 @@ import sys
 from pathlib import Path
 
 from config import AppConfig
-from runner import _effective_prompt_version, _sleep_seconds, build_provider, run_predictions
+from runner import (
+    _effective_prompt_version,
+    _sleep_seconds,
+    build_provider,
+    run_predictions,
+)
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
 from evaluation.metrics import (
@@ -182,7 +187,7 @@ from evaluation.metrics import (
     supporting_image_id_scores,
     write_errors_csv,
 )
-from evaluation.main import _latest_run_provider_summary, _write_report
+from evaluation.main import _latest_run_provider_summary, _price_for_model, _write_report
 
 
 def write_task7_minimal_dataset(root, user_claim="screen cracked"):
@@ -380,6 +385,199 @@ def test_run_predictions_retries_retryable_provider_errors(monkeypatch, tmp_path
     assert rows[0]["supporting_image_ids"] == "img_1"
     log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
     assert '"error_category": "server_error"' in log_text
+
+
+def test_run_predictions_uses_backup_after_operational_provider_failure(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_retries=0,
+        allow_backup_vlm=True,
+        backup_chain=(("openrouter", "openai/gpt-4.1-mini"),),
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class ErrorProvider:
+        name = "gemini"
+        model = "gemini-3.5-flash"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="gemini",
+                    model="gemini-3.5-flash",
+                    error_category="rate_limited",
+                ),
+            )
+
+    class BackupProvider:
+        name = "openrouter"
+        model = "openai/gpt-4.1-mini"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(
+                    provider="openrouter",
+                    model="openai/gpt-4.1-mini",
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                ),
+            )
+
+    providers = iter([ErrorProvider(), BackupProvider()])
+    monkeypatch.setattr("runner.build_provider_for_spec", lambda config, spec, allow_key_fallback=False: next(providers))
+    monkeypatch.setattr("runner.time.sleep", lambda seconds: None)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert rows[0]["claim_status"] == "supported"
+    log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
+    assert '"event": "provider_backup_selected"' in log_text
+    assert '"backup_reason": "rate_limited"' in log_text
+    assert '"final_provider": "openrouter"' in log_text
+    assert '"backup_used": true' in log_text
+
+
+def test_run_predictions_does_not_use_backup_for_valid_not_enough_information(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_retries=0,
+        allow_backup_vlm=True,
+        backup_chain=(("openrouter", "openai/gpt-4.1-mini"),),
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class ValidProvider:
+        name = "gemini"
+        model = "gemini-3.5-flash"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": False,
+                        "evidence_standard_met_reason": "The relevant part is not visible.",
+                        "risk_flags": ["manual_review_required"],
+                        "issue_type": "unknown",
+                        "object_part": "unknown",
+                        "claim_status": "not_enough_information",
+                        "claim_status_justification": "The image does not show the claimed part.",
+                        "supporting_image_ids": [],
+                        "valid_image": False,
+                        "severity": "unknown",
+                    }
+                },
+                metadata=ProviderMetadata(provider="gemini", model="gemini-3.5-flash"),
+            )
+
+    primary = ValidProvider()
+    monkeypatch.setattr("runner.build_provider_for_spec", lambda config, spec, allow_key_fallback=False: primary)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert primary.calls == 1
+    assert rows[0]["claim_status"] == "not_enough_information"
+    log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
+    assert '"event": "provider_backup_selected"' not in log_text
+    assert '"backup_used": false' in log_text
+
+
+def test_run_predictions_continues_to_next_backup_when_backup_key_missing(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_retries=0,
+        allow_backup_vlm=True,
+        backup_chain=(
+            ("openrouter", "openai/gpt-4.1-mini"),
+            ("anthropic", "claude-3-5-sonnet-latest"),
+        ),
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class ErrorProvider:
+        name = "gemini"
+        model = "gemini-3.5-flash"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="gemini",
+                    model="gemini-3.5-flash",
+                    error_category="rate_limited",
+                ),
+            )
+
+    class HealthyProvider:
+        name = "anthropic"
+        model = "claude-3-5-sonnet-latest"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="anthropic", model="claude-3-5-sonnet-latest"),
+            )
+
+    providers = iter([ErrorProvider(), RuntimeError("OPENROUTER_API_KEY is required"), HealthyProvider()])
+
+    def fake_build_provider(config, spec, allow_key_fallback=False):
+        provider = next(providers)
+        if isinstance(provider, Exception):
+            raise provider
+        return provider
+
+    monkeypatch.setattr("runner.build_provider_for_spec", fake_build_provider)
+    monkeypatch.setattr("runner.time.sleep", lambda seconds: None)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert rows[0]["claim_status"] == "supported"
+    log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
+    assert '"error_category": "auth_error"' in log_text
+    assert '"final_provider": "anthropic"' in log_text
 
 
 def test_run_predictions_does_not_cache_fallback_after_provider_error(monkeypatch, tmp_path):
@@ -837,6 +1035,67 @@ def test_evaluation_report_uses_observed_provider_for_fallback_call_counts(tmp_p
     assert "Fallback actually used/no-vision: `True`" in report
     assert "Model calls: 0" in report
     assert "Expected model calls: 0" in report
+
+
+def test_evaluation_report_uses_model_specific_prices(tmp_path):
+    report_path = tmp_path / "evaluation_report.md"
+    metrics = {
+        "rows_expected": 1,
+        "rows_predicted": 1,
+        "rows_compared": 1,
+        "error_count": 0,
+        "field_accuracy": {"claim_status": 1.0},
+        "risk_flag_scores": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    }
+
+    _write_report(
+        report_path,
+        metrics,
+        sample_rows=[{"image_paths": "images/sample/case_001/img_1.jpg"}],
+        test_rows=[{"image_paths": "images/test/case_001/img_1.jpg"}],
+        provider="gemini",
+        model="gemini-3.5-flash",
+        observed_provider="gemini",
+        fallback_allowed=False,
+        fallback_used=False,
+        sample_model_calls=1,
+        test_model_calls=1,
+        sample_prompt_tokens=1000,
+        sample_completion_tokens=100,
+        sample_latency_ms=1000,
+        input_price_per_million=0.0,
+        output_price_per_million=0.0,
+        model_prices={("gemini", "gemini-3.5-flash"): (1.50, 9.00)},
+        calls_by_model={
+            ("gemini", "gemini-3.5-flash"): {
+                "calls": 1,
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+            }
+        },
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "gemini/gemini-3.5-flash: 1 calls" in report
+    assert "input $1.5000 / 1M, output $9.0000 / 1M" in report
+    assert "Estimated full-test cost: $0.0024" in report
+
+
+def test_price_for_model_uses_specific_price_before_default():
+    assert _price_for_model(
+        "gemini",
+        "gemini-3.5-flash",
+        {("gemini", "gemini-3.5-flash"): (1.5, 9.0)},
+        default_input=0.32,
+        default_output=1.28,
+    ) == (1.5, 9.0)
+    assert _price_for_model(
+        "openrouter",
+        "unknown",
+        {},
+        default_input=0.32,
+        default_output=1.28,
+    ) == (0.32, 1.28)
 
 
 def test_latest_run_provider_summary_does_not_count_cache_hits_as_model_calls(tmp_path):

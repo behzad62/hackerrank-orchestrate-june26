@@ -19,6 +19,8 @@ python -m pip install -r code/requirements.txt
 ```bash
 VLM_PROVIDER=openai|openrouter|anthropic|gemini|none
 VLM_MODEL=gpt-4.1-mini
+ALLOW_BACKUP_VLM=false
+VLM_BACKUP_CHAIN=openrouter:openai/gpt-4.1-mini,anthropic:claude-3-5-sonnet-latest
 OPENAI_API_KEY=sk-redacted
 OPENROUTER_API_KEY=sk-or-redacted
 ANTHROPIC_API_KEY=sk-ant-redacted
@@ -35,9 +37,14 @@ GEMINI_THINKING_LEVEL=medium
 ALLOW_NO_VISION_FALLBACK=false
 VLM_INPUT_PRICE_PER_MILLION=0
 VLM_OUTPUT_PRICE_PER_MILLION=0
+VLM_MODEL_PRICES=openrouter:qwen/qwen3.7-plus=0.32,1.28;gemini:gemini-3.5-flash=1.50,9.00
 ```
 
 `none` is an honest no-vision fallback for smoke testing. It does not inspect images and returns conservative `not_enough_information` rows.
+
+`VLM_BACKUP_CHAIN` is only used when `ALLOW_BACKUP_VLM=true`. Backup VLMs are reliability fallbacks for provider/runtime failures such as exhausted quota, rate limits after retries, timeouts, server errors, truncated responses, malformed JSON, or temporary network errors. They are not used when the primary model returns a valid prediction such as `contradicted` or `not_enough_information`.
+
+`VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. The single `VLM_INPUT_PRICE_PER_MILLION` and `VLM_OUTPUT_PRICE_PER_MILLION` values remain the default when a provider/model is not listed.
 
 ## Run Final Predictions
 
@@ -74,6 +81,8 @@ Logs are written under `logs/` as JSONL and never include API keys, raw image by
 Cache files are written under `.cache/vlm/` by default and are keyed by provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version. Generation settings that can change predictions, including max output tokens and Gemini thinking level, are included in the effective cache key.
 
 Provider prompt caching is enabled by default when supported. The prompt is ordered with stable instructions, allowed values, output schema, evidence requirements, injection policy, and examples first; per-claim user history, claim text, image IDs, image payloads, and image metadata follow after that. Provider response logs include cache telemetry when returned by the API, including cached tokens, cache hit ratio, retention, and Anthropic cache creation/read tokens.
+
+When backup VLMs are enabled, logs include the primary provider, final provider, whether a backup was used, and the backup reason for each completed claim. Backup responses are not cached under the primary provider's cache key.
 
 ## Security Behavior
 

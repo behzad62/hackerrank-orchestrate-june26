@@ -10,7 +10,7 @@ CODE_DIR = Path(__file__).resolve().parents[1]
 if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
-from config import AppConfig, build_common_arg_parser, load_env_file
+from config import AppConfig, build_common_arg_parser, load_env_file, parse_model_prices
 from data import load_claim_rows
 from evaluation.metrics import compare_rows, write_errors_csv, write_metrics_json
 from runner import run_predictions
@@ -69,6 +69,12 @@ def _write_report(
     sample_latency_ms: int = 0,
     input_price_per_million: float = 0.0,
     output_price_per_million: float = 0.0,
+    model_prices: dict[tuple[str, str], tuple[float, float]] | None = None,
+    calls_by_model: dict[tuple[str, str], dict[str, int]] | None = None,
+    backup_reasons: dict[str, int] | None = None,
+    primary_provider_calls: int = 0,
+    backup_provider_calls: int = 0,
+    fallback_rows: int = 0,
 ) -> None:
     sample_images = _count_images(sample_rows)
     test_images = _count_images(test_rows)
@@ -79,10 +85,19 @@ def _write_report(
     cache_hit_ratio = sample_cached_tokens / sample_prompt_tokens if sample_prompt_tokens else 0.0
     projected_prompt_tokens = int(round(avg_prompt_tokens * test_model_calls))
     projected_completion_tokens = int(round(avg_completion_tokens * test_model_calls))
-    estimated_cost = (
-        (projected_prompt_tokens * input_price_per_million)
-        + (projected_completion_tokens * output_price_per_million)
-    ) / 1_000_000
+    model_prices = model_prices or {}
+    calls_by_model = calls_by_model or {}
+    backup_reasons = backup_reasons or {}
+    estimated_cost = _estimate_projected_cost(
+        calls_by_model,
+        model_prices,
+        default_input=input_price_per_million,
+        default_output=output_price_per_million,
+        sample_model_calls=sample_model_calls,
+        test_model_calls=test_model_calls,
+        fallback_prompt_tokens=projected_prompt_tokens,
+        fallback_completion_tokens=projected_completion_tokens,
+    )
     avg_latency_seconds = (sample_latency_ms / sample_model_calls / 1000) if sample_model_calls else 0.0
     estimated_runtime_seconds = avg_latency_seconds * test_model_calls
     estimates_available = bool(sample_model_calls or not test_model_calls)
@@ -126,6 +141,9 @@ def _write_report(
         )
     else:
         fallback_note = "A configured VLM provider was used for image inspection."
+
+    model_price_lines = _format_model_price_lines(calls_by_model, model_prices, input_price_per_million, output_price_per_million)
+    backup_reason_lines = _format_backup_reason_lines(backup_reasons)
 
     report = f"""# Evaluation Report
 
@@ -172,6 +190,12 @@ Sample set:
 - Rows: {len(sample_rows)}
 - Images: {sample_images}
 - Model calls: {sample_model_calls}
+- Primary provider calls: {primary_provider_calls}
+- Backup provider calls: {backup_provider_calls}
+- Fallback rows: {fallback_rows}
+
+Backup reasons:
+{backup_reason_lines}
 
 Test set:
 - Rows: {len(test_rows)}
@@ -185,6 +209,8 @@ Pricing assumptions:
 - Use provider token accounting from logs/provider metadata when available.
 - Input token price assumption: ${input_price_per_million:.4f} / 1M tokens.
 - Output token price assumption: ${output_price_per_million:.4f} / 1M tokens.
+- Model-specific price assumptions:
+{model_price_lines}
 - With `VLM_PROVIDER=none`, images were not inspected and model cost is $0.
 - If fallback is observed during a real-provider run, fallback rows did not receive visual inspection; provider rows may still have token costs.
 
@@ -232,6 +258,65 @@ Failure modes observed in logs:
     path.write_text(report, encoding="utf-8")
 
 
+def _price_for_model(
+    provider: str,
+    model: str,
+    model_prices: dict[tuple[str, str], tuple[float, float]],
+    default_input: float,
+    default_output: float,
+) -> tuple[float, float]:
+    return model_prices.get((provider.strip().lower(), model.strip()), (default_input, default_output))
+
+
+def _estimate_projected_cost(
+    calls_by_model: dict[tuple[str, str], dict[str, int]],
+    model_prices: dict[tuple[str, str], tuple[float, float]],
+    *,
+    default_input: float,
+    default_output: float,
+    sample_model_calls: int,
+    test_model_calls: int,
+    fallback_prompt_tokens: int,
+    fallback_completion_tokens: int,
+) -> float:
+    if not calls_by_model:
+        return ((fallback_prompt_tokens * default_input) + (fallback_completion_tokens * default_output)) / 1_000_000
+    priced_calls = sum(int(usage.get("calls", 0)) for usage in calls_by_model.values())
+    scale = (test_model_calls / priced_calls) if priced_calls else 0.0
+    total = 0.0
+    for (provider, model), usage in calls_by_model.items():
+        input_price, output_price = _price_for_model(provider, model, model_prices, default_input, default_output)
+        projected_prompt = int(round(int(usage.get("prompt_tokens", 0)) * scale))
+        projected_completion = int(round(int(usage.get("completion_tokens", 0)) * scale))
+        total += (projected_prompt * input_price) + (projected_completion * output_price)
+    return total / 1_000_000
+
+
+def _format_model_price_lines(
+    calls_by_model: dict[tuple[str, str], dict[str, int]],
+    model_prices: dict[tuple[str, str], tuple[float, float]],
+    default_input: float,
+    default_output: float,
+) -> str:
+    if not calls_by_model:
+        return "- none observed in this run"
+    lines = []
+    for provider, model in sorted(calls_by_model):
+        usage = calls_by_model[(provider, model)]
+        input_price, output_price = _price_for_model(provider, model, model_prices, default_input, default_output)
+        lines.append(
+            f"- {provider}/{model}: {int(usage.get('calls', 0))} calls, "
+            f"input ${input_price:.4f} / 1M, output ${output_price:.4f} / 1M"
+        )
+    return "\n".join(lines)
+
+
+def _format_backup_reason_lines(backup_reasons: dict[str, int]) -> str:
+    if not backup_reasons:
+        return "- none"
+    return "\n".join(f"- {reason}: {count}" for reason, count in sorted(backup_reasons.items()))
+
+
 def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Path) -> Path:
     if output_arg is None:
         return default_evaluation_dir / "sample_predictions.csv"
@@ -252,12 +337,23 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "cached_tokens": 0,
         "cache_write_tokens": 0,
         "latency_ms": 0,
+        "calls_by_model": {},
+        "backup_reasons": {},
+        "primary_provider_calls": 0,
+        "backup_provider_calls": 0,
+        "fallback_rows": 0,
     }
     if not log_path.exists():
         return summary
     providers: set[str] = set()
     model_calls = 0
     fallback_used = False
+    primary_provider = "unknown"
+    calls_by_model: dict[tuple[str, str], dict[str, int]] = {}
+    backup_reasons: dict[str, int] = {}
+    primary_provider_calls = 0
+    backup_provider_calls = 0
+    fallback_rows = 0
     for line in log_path.read_text(encoding="utf-8").splitlines():
         try:
             record = json.loads(line)
@@ -266,6 +362,12 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         if record.get("event") == "run_started":
             providers = set()
             model_calls = 0
+            primary_provider = str(record.get("provider") or "unknown").strip().lower()
+            calls_by_model = {}
+            backup_reasons = {}
+            primary_provider_calls = 0
+            backup_provider_calls = 0
+            fallback_rows = 0
             summary["prompt_tokens"] = 0
             summary["completion_tokens"] = 0
             summary["cached_tokens"] = 0
@@ -274,18 +376,38 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
             fallback_used = True
+        if record.get("event") == "claim_completed":
+            if record.get("backup_used") is True:
+                reason = str(record.get("backup_reason") or "unknown_provider_error")
+                backup_reasons[reason] = backup_reasons.get(reason, 0) + 1
         if record.get("event") == "provider_error":
             provider = str(record.get("provider") or "").strip().lower() or "unknown"
             providers.add(provider)
             if provider != "none":
                 model_calls += 1
+                if provider == primary_provider:
+                    primary_provider_calls += 1
+                else:
+                    backup_provider_calls += 1
         if record.get("event") == "provider_response":
             provider = str(record.get("provider") or "").strip().lower() or "unknown"
+            model_name = str(record.get("model") or "").strip()
             providers.add(provider)
             if record.get("used_fallback") is True:
                 fallback_used = True
+                fallback_rows += 1
             elif provider != "none" and record.get("cache_hit") is not True:
                 model_calls += 1
+                if provider == primary_provider:
+                    primary_provider_calls += 1
+                else:
+                    backup_provider_calls += 1
+                key = (provider, model_name)
+                if key not in calls_by_model:
+                    calls_by_model[key] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+                calls_by_model[key]["calls"] += 1
+                calls_by_model[key]["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
+                calls_by_model[key]["completion_tokens"] += int(record.get("completion_tokens") or 0)
                 summary["prompt_tokens"] = int(summary["prompt_tokens"]) + int(record.get("prompt_tokens") or 0)
                 summary["completion_tokens"] = int(summary["completion_tokens"]) + int(record.get("completion_tokens") or 0)
                 summary["cached_tokens"] = int(summary["cached_tokens"]) + int(record.get("cached_tokens") or 0)
@@ -299,6 +421,11 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     summary["fallback_used"] = fallback_used
     summary["observed_provider"] = observed_provider
     summary["model_calls"] = model_calls
+    summary["calls_by_model"] = calls_by_model
+    summary["backup_reasons"] = backup_reasons
+    summary["primary_provider_calls"] = primary_provider_calls
+    summary["backup_provider_calls"] = backup_provider_calls
+    summary["fallback_rows"] = fallback_rows
     return summary
 
 
@@ -353,6 +480,7 @@ def main() -> int:
     test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} else 0
     input_price_per_million = float(os.environ.get("VLM_INPUT_PRICE_PER_MILLION", "0"))
     output_price_per_million = float(os.environ.get("VLM_OUTPUT_PRICE_PER_MILLION", "0"))
+    model_prices = parse_model_prices(os.environ.get("VLM_MODEL_PRICES", ""))
     _write_report(
         report_path,
         metrics,
@@ -372,6 +500,12 @@ def main() -> int:
         sample_latency_ms=int(run_summary["latency_ms"]),
         input_price_per_million=input_price_per_million,
         output_price_per_million=output_price_per_million,
+        model_prices=model_prices,
+        calls_by_model=run_summary["calls_by_model"],
+        backup_reasons=run_summary["backup_reasons"],
+        primary_provider_calls=int(run_summary["primary_provider_calls"]),
+        backup_provider_calls=int(run_summary["backup_provider_calls"]),
+        fallback_rows=int(run_summary["fallback_rows"]),
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")

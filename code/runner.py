@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from cache import build_cache_key, read_cache, write_cache
-from config import AppConfig
+from config import AppConfig, ProviderSpec
 from data import load_claim_rows, load_evidence_requirements, load_user_history, write_output_rows
 from images import prepare_images
 from logging_config import JsonlLogger
@@ -24,22 +24,42 @@ RETRYABLE_ERROR_CATEGORIES = {
     "response_truncated",
     "json_parse_error",
 }
+BACKUP_TRIGGER_ERROR_CATEGORIES = {
+    "auth_error",
+    "insufficient_credit",
+    "rate_limited",
+    "response_truncated",
+    "json_parse_error",
+    "timeout",
+    "network_error",
+    "server_error",
+    "unknown_provider_error",
+}
 
 
-def build_provider(cfg: AppConfig):
-    provider = cfg.provider.strip().lower()
+def _coerce_provider_spec(spec: ProviderSpec | tuple[str, str]) -> ProviderSpec:
+    if isinstance(spec, ProviderSpec):
+        return spec
+    provider, model = spec
+    return ProviderSpec(provider=str(provider).strip().lower(), model=str(model).strip())
+
+
+def build_provider_for_spec(cfg: AppConfig, spec: ProviderSpec | tuple[str, str], allow_key_fallback: bool = False):
+    spec = _coerce_provider_spec(spec)
+    provider = spec.provider.strip().lower()
+    model = spec.model.strip()
     if provider == "none":
         return FallbackProvider()
     if provider == "openai":
         key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
-            if cfg.allow_no_vision_fallback:
+            if allow_key_fallback and cfg.allow_no_vision_fallback:
                 return FallbackProvider()
             raise RuntimeError("OPENAI_API_KEY is required when VLM_PROVIDER=openai")
         return OpenAICompatibleProvider(
             provider="openai",
             api_key=key,
-            model=cfg.model,
+            model=model,
             base_url="https://api.openai.com/v1",
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
@@ -50,13 +70,13 @@ def build_provider(cfg: AppConfig):
     if provider == "openrouter":
         key = os.environ.get("OPENROUTER_API_KEY", "")
         if not key:
-            if cfg.allow_no_vision_fallback:
+            if allow_key_fallback and cfg.allow_no_vision_fallback:
                 return FallbackProvider()
             raise RuntimeError("OPENROUTER_API_KEY is required when VLM_PROVIDER=openrouter")
         return OpenAICompatibleProvider(
             provider="openrouter",
             api_key=key,
-            model=cfg.model,
+            model=model,
             base_url="https://openrouter.ai/api/v1",
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
@@ -67,12 +87,12 @@ def build_provider(cfg: AppConfig):
     if provider == "anthropic":
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
-            if cfg.allow_no_vision_fallback:
+            if allow_key_fallback and cfg.allow_no_vision_fallback:
                 return FallbackProvider()
             raise RuntimeError("ANTHROPIC_API_KEY is required when VLM_PROVIDER=anthropic")
         return AnthropicProvider(
             api_key=key,
-            model=cfg.model,
+            model=model,
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
@@ -82,19 +102,27 @@ def build_provider(cfg: AppConfig):
     if provider == "gemini":
         key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
         if not key:
-            if cfg.allow_no_vision_fallback:
+            if allow_key_fallback and cfg.allow_no_vision_fallback:
                 return FallbackProvider()
             raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is required when VLM_PROVIDER=gemini")
         return GeminiProvider(
             api_key=key,
-            model=cfg.model or "gemini-3.5-flash",
+            model=model or "gemini-3.5-flash",
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,
             prompt_cache_retention=cfg.prompt_cache_retention,
             thinking_level=cfg.gemini_thinking_level,
         )
-    raise ValueError(f"Unsupported provider: {cfg.provider}")
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def build_provider(cfg: AppConfig):
+    return build_provider_for_spec(
+        cfg,
+        ProviderSpec(provider=cfg.provider, model=cfg.model),
+        allow_key_fallback=True,
+    )
 
 
 def _fallback_result(context: PredictionContext, provider_name: str, error_category: str = "") -> ProviderResult:
@@ -131,7 +159,16 @@ def _effective_prompt_version(cfg: AppConfig) -> str:
     return "|".join(f"{key}={value}" for key, value in generation_settings.items())
 
 
-def _call_with_retries(provider: Any, context: PredictionContext, cfg: AppConfig, logger: JsonlLogger) -> ProviderResult:
+def _call_with_retries(
+    provider: Any,
+    context: PredictionContext,
+    cfg: AppConfig,
+    logger: JsonlLogger,
+    allow_no_vision_fallback: bool | None = None,
+    raise_on_failure: bool = True,
+) -> ProviderResult:
+    if allow_no_vision_fallback is None:
+        allow_no_vision_fallback = cfg.allow_no_vision_fallback
     provider_name = getattr(provider, "name", cfg.provider)
     last_result: ProviderResult | None = None
 
@@ -181,7 +218,7 @@ def _call_with_retries(provider: Any, context: PredictionContext, cfg: AppConfig
         )
         time.sleep(sleep_seconds)
 
-    if cfg.allow_no_vision_fallback:
+    if allow_no_vision_fallback:
         category = last_result.metadata.error_category if last_result else "unknown_provider_error"
         logger.write(
             "provider_fallback_used",
@@ -191,8 +228,115 @@ def _call_with_retries(provider: Any, context: PredictionContext, cfg: AppConfig
         )
         return _fallback_result(context, provider_name, category)
 
+    if last_result and not raise_on_failure:
+        return last_result
     category = last_result.metadata.error_category if last_result else "unknown_provider_error"
     raise RuntimeError(f"Provider failed and fallback is disabled: {category}")
+
+
+def _provider_chain_specs(cfg: AppConfig) -> list[ProviderSpec]:
+    primary = ProviderSpec(provider=cfg.provider, model=cfg.model)
+    if not cfg.allow_backup_vlm:
+        return [primary]
+    return [primary, *[_coerce_provider_spec(spec) for spec in cfg.backup_chain]]
+
+
+def _call_provider_chain(
+    cfg: AppConfig,
+    context: PredictionContext,
+    logger: JsonlLogger,
+) -> tuple[ProviderResult, str, str, bool, str]:
+    specs = _provider_chain_specs(cfg)
+    primary_provider = specs[0].provider if specs else cfg.provider
+    last_result: ProviderResult | None = None
+    backup_reason = ""
+
+    if not cfg.allow_backup_vlm:
+        result = _call_with_retries(build_provider(cfg), context, cfg, logger)
+        final_provider = result.metadata.provider or primary_provider
+        return result, primary_provider, final_provider, False, ""
+
+    logger.write(
+        "provider_chain_started",
+        row_index=context.row_index,
+        primary_provider=primary_provider,
+        backup_count=max(0, len(specs) - 1),
+    )
+    for index, spec in enumerate(specs):
+        is_backup = index > 0
+        logger.write(
+            "provider_chain_step_started",
+            row_index=context.row_index,
+            provider=spec.provider,
+            model=spec.model,
+            is_backup=is_backup,
+        )
+        try:
+            provider = build_provider_for_spec(cfg, spec, allow_key_fallback=False)
+        except RuntimeError as exc:
+            result = ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider=spec.provider,
+                    model=spec.model,
+                    error_category="auth_error",
+                ),
+            )
+            logger.write(
+                "provider_exception",
+                row_index=context.row_index,
+                provider=spec.provider,
+                error_category="auth_error",
+                safe_message=str(exc)[:240],
+                retry_count=0,
+            )
+        else:
+            result = _call_with_retries(
+                provider,
+                context,
+                cfg,
+                logger,
+                allow_no_vision_fallback=False,
+                raise_on_failure=False,
+            )
+        last_result = result
+        category = result.metadata.error_category
+        if not category:
+            final_provider = result.metadata.provider or spec.provider
+            if is_backup:
+                logger.write(
+                    "provider_backup_selected",
+                    row_index=context.row_index,
+                    primary_provider=primary_provider,
+                    final_provider=final_provider,
+                    backup_reason=backup_reason,
+                )
+            return result, primary_provider, final_provider, is_backup, backup_reason
+        logger.write(
+            "provider_chain_step_failed",
+            row_index=context.row_index,
+            provider=result.metadata.provider or spec.provider,
+            model=result.metadata.model or spec.model,
+            error_category=category,
+            is_backup=is_backup,
+        )
+        if category not in BACKUP_TRIGGER_ERROR_CATEGORIES:
+            break
+        backup_reason = backup_reason or category
+
+    if cfg.allow_no_vision_fallback:
+        category = last_result.metadata.error_category if last_result else "unknown_provider_error"
+        logger.write(
+            "provider_fallback_used",
+            row_index=context.row_index,
+            provider=primary_provider,
+            error_category=category,
+        )
+        result = _fallback_result(context, primary_provider, category)
+        return result, primary_provider, result.metadata.provider, False, category
+
+    category = last_result.metadata.error_category if last_result else "unknown_provider_error"
+    raise RuntimeError(f"Provider chain failed and fallback is disabled: {category}")
 
 
 def _metadata_from_cache(payload: dict[str, Any]) -> ProviderMetadata:
@@ -284,8 +428,7 @@ def run_predictions(
     claims_path = claims_csv or paths.claims_csv
     output_path = output_csv or paths.output_csv
     logger = JsonlLogger(paths.logs_dir / "run.jsonl")
-    provider = build_provider(cfg)
-    provider_name = getattr(provider, "name", cfg.provider)
+    provider_name = cfg.provider
 
     claim_rows = load_claim_rows(claims_path)
     user_history = load_user_history(paths.user_history_csv)
@@ -307,6 +450,10 @@ def run_predictions(
     )
 
     for row_index, row in enumerate(claim_rows, start=1):
+        primary_provider = provider_name
+        final_provider = ""
+        backup_used = False
+        backup_reason = ""
         prepared_images = prepare_images(paths.repo_root, row.get("image_paths", ""), paths.images_dir)
         history = user_history.get(row.get("user_id", ""), {})
         requirements = _selected_requirements(all_requirements, row.get("claim_object", ""))
@@ -366,8 +513,12 @@ def run_predictions(
                 logger.write("cache_ignored_degraded_result", row_index=row_index, provider=provider_name)
                 cached = None
         if not cached:
-            result = _call_with_retries(provider, context, cfg, logger)
-            if not result.used_fallback and not result.metadata.error_category:
+            result, primary_provider, final_provider, backup_used, backup_reason = _call_provider_chain(
+                cfg,
+                context,
+                logger,
+            )
+            if not backup_used and not result.used_fallback and not result.metadata.error_category:
                 write_cache(
                     paths.cache_dir,
                     cache_key,
@@ -388,6 +539,10 @@ def run_predictions(
         logger.write(
             "claim_completed",
             row_index=row_index,
+            primary_provider=primary_provider,
+            final_provider=final_provider or result.metadata.provider,
+            backup_used=backup_used,
+            backup_reason=backup_reason,
             claim_status=final_row["claim_status"],
             issue_type=final_row["issue_type"],
             object_part=final_row["object_part"],
