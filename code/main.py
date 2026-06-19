@@ -20,6 +20,8 @@ def main() -> int:
         model=args.model,
         retries=args.retries,
         fallback=args.fallback,
+        prompt_cache_enabled=args.prompt_cache_enabled,
+        prompt_cache_retention=args.prompt_cache_retention,
     )
     if cfg.paths is None:
         raise ValueError("AppConfig.paths is required")

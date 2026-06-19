@@ -44,6 +44,8 @@ def build_provider(cfg: AppConfig):
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
+            prompt_cache_enabled=cfg.prompt_cache_enabled,
+            prompt_cache_retention=cfg.prompt_cache_retention,
         )
     if provider == "openrouter":
         key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -59,6 +61,8 @@ def build_provider(cfg: AppConfig):
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
+            prompt_cache_enabled=cfg.prompt_cache_enabled,
+            prompt_cache_retention=cfg.prompt_cache_retention,
         )
     if provider == "anthropic":
         key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -72,6 +76,8 @@ def build_provider(cfg: AppConfig):
             temperature=cfg.temperature,
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
+            prompt_cache_enabled=cfg.prompt_cache_enabled,
+            prompt_cache_retention=cfg.prompt_cache_retention,
         )
     raise ValueError(f"Unsupported provider: {cfg.provider}")
 
@@ -179,6 +185,12 @@ def _metadata_from_cache(payload: dict[str, Any]) -> ProviderMetadata:
         http_status=int(metadata.get("http_status") or 0),
         error_category=str(metadata.get("error_category") or ""),
         cache_hit=True,
+        cached_tokens=int(metadata.get("cached_tokens") or 0),
+        cache_hit_ratio=float(metadata.get("cache_hit_ratio") or 0.0),
+        prompt_cache_retention=str(metadata.get("prompt_cache_retention") or ""),
+        prompt_cache_key_used=bool(metadata.get("prompt_cache_key_used") or False),
+        cache_creation_input_tokens=int(metadata.get("cache_creation_input_tokens") or 0),
+        cache_read_input_tokens=int(metadata.get("cache_read_input_tokens") or 0),
     )
 
 
@@ -223,6 +235,12 @@ def _write_provider_response_log(
         prompt_tokens=metadata.prompt_tokens,
         completion_tokens=metadata.completion_tokens,
         total_tokens=metadata.total_tokens,
+        cached_tokens=metadata.cached_tokens,
+        cache_hit_ratio=metadata.cache_hit_ratio,
+        prompt_cache_retention=metadata.prompt_cache_retention,
+        prompt_cache_key_used=metadata.prompt_cache_key_used,
+        cache_creation_input_tokens=metadata.cache_creation_input_tokens,
+        cache_read_input_tokens=metadata.cache_read_input_tokens,
         cache_hit=cache_hit,
         used_fallback=result.used_fallback,
     )
@@ -255,6 +273,8 @@ def run_predictions(
         claims_file=str(claims_path),
         output_file=str(output_path),
         fallback_allowed=cfg.allow_no_vision_fallback,
+        prompt_cache_enabled=cfg.prompt_cache_enabled,
+        prompt_cache_retention=cfg.prompt_cache_retention,
     )
 
     for row_index, row in enumerate(claim_rows, start=1):
@@ -266,6 +286,7 @@ def run_predictions(
             row=row,
             user_history=history,
             evidence_requirements=requirements,
+            all_evidence_requirements=all_requirements,
             prepared_images=prepared_images,
             claim_text_risk_flags=detect_prompt_injection_flags(row.get("user_claim", "")),
         )

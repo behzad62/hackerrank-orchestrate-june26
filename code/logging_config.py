@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any
 
 SECRET_MARKERS = ("api_key", "authorization", "token", "secret", "cookie")
-SAFE_NUMERIC_TOKEN_KEYS = {"prompt_tokens", "completion_tokens", "total_tokens"}
+SAFE_NUMERIC_TOKEN_KEYS = {
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+}
 IMAGE_PAYLOAD_MARKERS = ("data_base64", "base64", "image_payload", "image_bytes", "raw_image")
 MAX_STRING_LENGTH = 240
 IMAGE_DATA_URI_PATTERN = re.compile(r"data:image(?:/[a-z0-9.+-]+)?;base64,", re.IGNORECASE)

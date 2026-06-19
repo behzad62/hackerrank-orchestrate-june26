@@ -38,6 +38,8 @@ class AppConfig:
     timeout_seconds: int = 90
     allow_no_vision_fallback: bool = True
     max_output_tokens: int = 1800
+    prompt_cache_enabled: bool = True
+    prompt_cache_retention: str = "24h"
     prompt_version: str = "claim-review-v1"
     paths: AppPaths | None = None
 
@@ -56,6 +58,8 @@ class AppConfig:
             timeout_seconds=int(os.environ.get("VLM_TIMEOUT_SECONDS", "90")),
             allow_no_vision_fallback=_env_bool("ALLOW_NO_VISION_FALLBACK", True),
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
+            prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
+            prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),
             paths=paths,
         )
 
@@ -73,6 +77,8 @@ class AppConfig:
         model: str | None = None,
         retries: int | None = None,
         fallback: bool | None = None,
+        prompt_cache_enabled: bool | None = None,
+        prompt_cache_retention: str | None = None,
         save_errors: bool | None = None,
     ) -> "AppConfig":
         del save_errors
@@ -96,6 +102,12 @@ class AppConfig:
             model=(model if model is not None else self.model).strip(),
             max_retries=retries if retries is not None else self.max_retries,
             allow_no_vision_fallback=fallback if fallback is not None else self.allow_no_vision_fallback,
+            prompt_cache_enabled=(
+                prompt_cache_enabled if prompt_cache_enabled is not None else self.prompt_cache_enabled
+            ),
+            prompt_cache_retention=(
+                prompt_cache_retention if prompt_cache_retention is not None else self.prompt_cache_retention
+            ).strip(),
         )
 
 
@@ -115,5 +127,8 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--retries", type=int, default=None)
     parser.add_argument("--fallback", dest="fallback", action="store_true", default=None)
     parser.add_argument("--no-fallback", dest="fallback", action="store_false")
+    parser.add_argument("--prompt-cache", dest="prompt_cache_enabled", action="store_true", default=None)
+    parser.add_argument("--no-prompt-cache", dest="prompt_cache_enabled", action="store_false")
+    parser.add_argument("--prompt-cache-retention", default=None)
     parser.add_argument("--save-errors", action="store_true")
     return parser

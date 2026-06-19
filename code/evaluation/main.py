@@ -307,6 +307,8 @@ def main() -> int:
         model=args.model,
         retries=args.retries,
         fallback=args.fallback,
+        prompt_cache_enabled=args.prompt_cache_enabled,
+        prompt_cache_retention=args.prompt_cache_retention,
         save_errors=args.save_errors,
     )
     if cfg.paths is None:

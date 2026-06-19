@@ -122,6 +122,42 @@ def test_openai_compatible_packages_image_url(monkeypatch):
     assert result.metadata.request_id == "req_123"
 
 
+def test_openai_compatible_parses_prompt_cache_usage(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"decision":{"claim_status":"supported"}}'},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "total_tokens": 105,
+                    "prompt_tokens_details": {"cached_tokens": 64},
+                },
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+        prompt_cache_enabled=True,
+        prompt_cache_retention="24h",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.metadata.cached_tokens == 64
+    assert result.metadata.cache_hit_ratio == 0.64
+    assert result.metadata.prompt_cache_retention == "24h"
+    assert result.metadata.prompt_cache_key_used is True
+
+
 def test_openrouter_headers_are_included(monkeypatch):
     captured = {}
 
@@ -489,6 +525,45 @@ def test_anthropic_packages_image_blocks(monkeypatch):
     assert result.metadata.total_tokens == 18
     assert result.metadata.finish_reason == "end_turn"
     assert result.metadata.request_id == "req_ant_123"
+
+
+def test_anthropic_uses_static_prefix_cache_control_and_parses_usage(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": '{"decision":{"claim_status":"supported"}}'}],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 8,
+                    "cache_creation_input_tokens": 32,
+                    "cache_read_input_tokens": 48,
+                },
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(
+        api_key="sk-ant-test",
+        model="model",
+        prompt_cache_enabled=True,
+        prompt_cache_retention="1h",
+    )
+    result = provider.review_claim(sample_context())
+
+    system = captured["json"]["system"]
+    assert system[0]["type"] == "text"
+    assert system[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert "front bumper scratch" not in system[0]["text"]
+    assert result.metadata.cache_creation_input_tokens == 32
+    assert result.metadata.cache_read_input_tokens == 48
+    assert result.metadata.cached_tokens == 48
+    assert result.metadata.cache_hit_ratio == 0.48
+    assert result.metadata.prompt_cache_retention == "1h"
+    assert result.metadata.prompt_cache_key_used is True
 
 
 def test_anthropic_returns_error_metadata(monkeypatch):

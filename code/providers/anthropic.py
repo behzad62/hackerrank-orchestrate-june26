@@ -5,17 +5,19 @@ from typing import Any
 
 import requests
 
-from providers.openai_compatible import _safe_token_count, categorize_http_error, extract_json_object
-from prompting import build_text_prompt
+from providers.openai_compatible import _cache_hit_ratio, _safe_token_count, categorize_http_error, extract_json_object
+from prompting import build_prompt_parts
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 
 
-def _normalize_anthropic_usage(usage: Any) -> tuple[int, int]:
+def _normalize_anthropic_usage(usage: Any) -> tuple[int, int, int, int]:
     if not isinstance(usage, dict):
         usage = {}
     return (
         _safe_token_count(usage.get("input_tokens")),
         _safe_token_count(usage.get("output_tokens")),
+        _safe_token_count(usage.get("cache_creation_input_tokens")),
+        _safe_token_count(usage.get("cache_read_input_tokens")),
     )
 
 
@@ -29,15 +31,32 @@ class AnthropicProvider:
         temperature: float = 0.0,
         timeout_seconds: int = 90,
         max_output_tokens: int = 1800,
+        prompt_cache_enabled: bool = True,
+        prompt_cache_retention: str = "24h",
     ):
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
+        self.prompt_cache_enabled = prompt_cache_enabled
+        self.prompt_cache_retention = prompt_cache_retention
+
+    def _system(self, context: PredictionContext) -> list[dict[str, Any]]:
+        block: dict[str, Any] = {
+            "type": "text",
+            "text": build_prompt_parts(context).static_prefix,
+        }
+        if self.prompt_cache_enabled:
+            cache_control = {"type": "ephemeral"}
+            if self.prompt_cache_retention in {"5m", "1h"}:
+                cache_control["ttl"] = self.prompt_cache_retention
+            block["cache_control"] = cache_control
+        return [block]
 
     def _content(self, context: PredictionContext) -> list[dict[str, Any]]:
-        content: list[dict[str, Any]] = [{"type": "text", "text": build_text_prompt(context)}]
+        prompt_parts = build_prompt_parts(context)
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt_parts.dynamic_suffix}]
         for image in context.prepared_images:
             if not image.readable or not image.data_base64:
                 continue
@@ -64,6 +83,8 @@ class AnthropicProvider:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
     ) -> ProviderResult:
         return ProviderResult(
             raw_json={"decision": {}},
@@ -78,6 +99,12 @@ class AnthropicProvider:
                 request_id=request_id,
                 http_status=http_status,
                 error_category=category,
+                cached_tokens=cache_read_input_tokens,
+                cache_hit_ratio=_cache_hit_ratio(cache_read_input_tokens, prompt_tokens),
+                prompt_cache_retention=self.prompt_cache_retention if self.prompt_cache_enabled else "",
+                prompt_cache_key_used=self.prompt_cache_enabled,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
             ),
         )
 
@@ -95,6 +122,7 @@ class AnthropicProvider:
                     "model": self.model,
                     "max_tokens": self.max_output_tokens,
                     "temperature": self.temperature,
+                    "system": self._system(context),
                     "messages": [{"role": "user", "content": self._content(context)}],
                 },
                 timeout=self.timeout_seconds,
@@ -117,12 +145,19 @@ class AnthropicProvider:
 
         input_tokens = 0
         output_tokens = 0
+        cache_creation_input_tokens = 0
+        cache_read_input_tokens = 0
         stop_reason = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
-            input_tokens, output_tokens = _normalize_anthropic_usage(data.get("usage"))
+            (
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            ) = _normalize_anthropic_usage(data.get("usage"))
             stop_reason = str(data.get("stop_reason") or "")
             if stop_reason == "max_tokens":
                 return self._error_result(
@@ -134,6 +169,8 @@ class AnthropicProvider:
                     prompt_tokens=input_tokens,
                     completion_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
+                    cache_creation_input_tokens=cache_creation_input_tokens,
+                    cache_read_input_tokens=cache_read_input_tokens,
                 )
             content = data.get("content")
             if not isinstance(content, list) or not content:
@@ -156,6 +193,8 @@ class AnthropicProvider:
                 prompt_tokens=input_tokens,
                 completion_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
             )
         return ProviderResult(
             raw_json=parsed,
@@ -170,5 +209,11 @@ class AnthropicProvider:
                 request_id=response.headers.get("request-id", ""),
                 http_status=response.status_code,
                 error_category="response_truncated" if stop_reason == "max_tokens" else "",
+                cached_tokens=cache_read_input_tokens,
+                cache_hit_ratio=_cache_hit_ratio(cache_read_input_tokens, input_tokens),
+                prompt_cache_retention=self.prompt_cache_retention if self.prompt_cache_enabled else "",
+                prompt_cache_key_used=self.prompt_cache_enabled,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
             ),
         )

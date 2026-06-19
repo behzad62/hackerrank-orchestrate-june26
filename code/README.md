@@ -26,6 +26,8 @@ VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=90
 VLM_CACHE_DIR=.cache/vlm
+PROMPT_CACHE_ENABLED=true
+PROMPT_CACHE_RETENTION=24h
 ALLOW_NO_VISION_FALLBACK=false
 VLM_INPUT_PRICE_PER_MILLION=0
 VLM_OUTPUT_PRICE_PER_MILLION=0
@@ -66,6 +68,8 @@ Outputs:
 Logs are written under `logs/` as JSONL and never include API keys, raw image bytes, or base64 payloads.
 
 Cache files are written under `.cache/vlm/` by default and are keyed by provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
+
+Provider prompt caching is enabled by default when supported. The prompt is ordered with stable instructions, allowed values, output schema, evidence requirements, injection policy, and examples first; per-claim user history, claim text, image IDs, image payloads, and image metadata follow after that. Provider response logs include cache telemetry when returned by the API, including cached tokens, cache hit ratio, retention, and Anthropic cache creation/read tokens.
 
 ## Security Behavior
 

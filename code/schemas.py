@@ -156,6 +156,12 @@ class ProviderMetadata:
     http_status: int = 0
     error_category: str = ""
     cache_hit: bool = False
+    cached_tokens: int = 0
+    cache_hit_ratio: float = 0.0
+    prompt_cache_retention: str = ""
+    prompt_cache_key_used: bool = False
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -171,5 +177,6 @@ class PredictionContext:
     row: dict[str, str]
     user_history: dict[str, str] = field(default_factory=dict)
     evidence_requirements: list[dict[str, str]] = field(default_factory=list)
+    all_evidence_requirements: list[dict[str, str]] = field(default_factory=list)
     prepared_images: list[PreparedImage] = field(default_factory=list)
     claim_text_risk_flags: list[str] = field(default_factory=list)

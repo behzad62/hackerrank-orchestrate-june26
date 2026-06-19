@@ -37,6 +37,12 @@ def test_jsonl_logger_writes_safe_events(tmp_path):
         prompt_tokens=12,
         completion_tokens=5,
         total_tokens=17,
+        cached_tokens=8,
+        cache_hit_ratio=0.47,
+        prompt_cache_retention="24h",
+        prompt_cache_key_used=True,
+        cache_creation_input_tokens=3,
+        cache_read_input_tokens=8,
         api_key="sk-hidden",
         headers={"Authorization": "Bearer hidden"},
         nested={"session_token": "secret-token"},
@@ -50,6 +56,12 @@ def test_jsonl_logger_writes_safe_events(tmp_path):
     assert record["prompt_tokens"] == 12
     assert record["completion_tokens"] == 5
     assert record["total_tokens"] == 17
+    assert record["cached_tokens"] == 8
+    assert record["cache_hit_ratio"] == 0.47
+    assert record["prompt_cache_retention"] == "24h"
+    assert record["prompt_cache_key_used"] is True
+    assert record["cache_creation_input_tokens"] == 3
+    assert record["cache_read_input_tokens"] == 8
     assert record["api_key"] == "[REDACTED]"
     assert record["headers"]["Authorization"] == "[REDACTED]"
     assert record["nested"]["session_token"] == "[REDACTED]"
