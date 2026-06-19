@@ -73,6 +73,11 @@ def _write_report(
             "A VLM provider was configured, but no-vision fallback was observed for at least one row. "
             "Successful provider rows may have inspected images; fallback rows did not."
         )
+    elif sample_model_calls == 0:
+        fallback_note = (
+            "No fresh provider calls were made in this run. Results came from cached provider output, "
+            "so any visual inspection occurred in the earlier run that populated the cache."
+        )
     else:
         fallback_note = "A configured VLM provider was used for image inspection."
 
