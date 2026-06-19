@@ -220,7 +220,7 @@ def normalize_provider_result(
 
     risk_flags = merge_risk_flags(
         _normalize_risk_flags(decision.get("risk_flags")),
-        context.claim_text_risk_flags,
+        _normalize_risk_flags(context.claim_text_risk_flags),
         _history_flags(context),
     )
 
