@@ -109,6 +109,7 @@ class AppPaths:
     sample_claims_csv: Path
     user_history_csv: Path
     evidence_requirements_csv: Path
+    images_dir: Path
     output_csv: Path
     logs_dir: Path
     cache_dir: Path
@@ -122,6 +123,7 @@ class AppPaths:
             sample_claims_csv=root / "dataset" / "sample_claims.csv",
             user_history_csv=root / "dataset" / "user_history.csv",
             evidence_requirements_csv=root / "dataset" / "evidence_requirements.csv",
+            images_dir=root / "dataset" / "images",
             output_csv=root / "output.csv",
             logs_dir=root / "logs",
             cache_dir=root / ".cache" / "vlm",

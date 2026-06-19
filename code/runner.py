@@ -252,7 +252,7 @@ def run_predictions(
     )
 
     for row_index, row in enumerate(claim_rows, start=1):
-        prepared_images = prepare_images(paths.repo_root, row.get("image_paths", ""))
+        prepared_images = prepare_images(paths.repo_root, row.get("image_paths", ""), paths.images_dir)
         history = user_history.get(row.get("user_id", ""), {})
         requirements = _selected_requirements(all_requirements, row.get("claim_object", ""))
         context = PredictionContext(

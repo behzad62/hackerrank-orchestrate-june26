@@ -15,6 +15,20 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def load_env_file(path: Path | None) -> None:
+    if path is None:
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, value.strip().strip("\"'"))
+
+
 @dataclass(frozen=True)
 class AppConfig:
     provider: str
@@ -49,25 +63,39 @@ class AppConfig:
         self,
         claims: Path | None = None,
         sample: Path | None = None,
+        history: Path | None = None,
+        evidence: Path | None = None,
+        images: Path | None = None,
         output: Path | None = None,
+        log: Path | None = None,
+        cache: Path | None = None,
         provider: str | None = None,
         model: str | None = None,
+        retries: int | None = None,
+        fallback: bool | None = None,
         save_errors: bool | None = None,
     ) -> "AppConfig":
         del save_errors
         paths = self.paths
-        if paths and (claims or sample or output):
+        if paths and (claims or sample or history or evidence or images or output or log or cache):
             paths = replace(
                 paths,
                 claims_csv=claims or paths.claims_csv,
                 sample_claims_csv=sample or paths.sample_claims_csv,
+                user_history_csv=history or paths.user_history_csv,
+                evidence_requirements_csv=evidence or paths.evidence_requirements_csv,
+                images_dir=images or paths.images_dir,
                 output_csv=output or paths.output_csv,
+                logs_dir=log or paths.logs_dir,
+                cache_dir=cache or paths.cache_dir,
             )
         return replace(
             self,
             paths=paths,
             provider=(provider or self.provider).strip().lower(),
             model=(model if model is not None else self.model).strip(),
+            max_retries=retries if retries is not None else self.max_retries,
+            allow_no_vision_fallback=fallback if fallback is not None else self.allow_no_vision_fallback,
         )
 
 
@@ -75,8 +103,17 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--claims", type=Path, default=None)
     parser.add_argument("--sample", type=Path, default=None)
+    parser.add_argument("--history", type=Path, default=None)
+    parser.add_argument("--evidence", type=Path, default=None)
+    parser.add_argument("--images", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--log", type=Path, default=None)
+    parser.add_argument("--cache", type=Path, default=None)
+    parser.add_argument("--env", type=Path, default=None)
     parser.add_argument("--provider", choices=["openai", "openrouter", "anthropic", "none"], default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--retries", type=int, default=None)
+    parser.add_argument("--fallback", dest="fallback", action="store_true", default=None)
+    parser.add_argument("--no-fallback", dest="fallback", action="store_false")
     parser.add_argument("--save-errors", action="store_true")
     return parser

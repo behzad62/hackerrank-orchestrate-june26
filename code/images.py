@@ -15,10 +15,17 @@ def extract_image_id(image_path: str) -> str:
     return Path(image_path).stem
 
 
-def resolve_image_path(repo_root: Path, image_path: str) -> Path:
+def resolve_image_path(repo_root: Path, image_path: str, images_dir: Path | None = None) -> Path:
     candidate = Path(image_path)
     if candidate.is_absolute():
         return candidate
+
+    if images_dir is not None:
+        parts = candidate.parts
+        image_relative = Path(*parts[1:]) if parts and parts[0] == "images" else candidate
+        image_root_candidate = images_dir / image_relative
+        if image_root_candidate.exists():
+            return image_root_candidate
 
     direct = repo_root / candidate
     if direct.exists():
@@ -111,8 +118,8 @@ def _image_bytes_are_decodable(data: bytes) -> bool:
         return False
 
 
-def prepare_image(repo_root: Path, image_path: str) -> PreparedImage:
-    absolute_path = resolve_image_path(repo_root, image_path)
+def prepare_image(repo_root: Path, image_path: str, images_dir: Path | None = None) -> PreparedImage:
+    absolute_path = resolve_image_path(repo_root, image_path, images_dir)
     image_id = extract_image_id(image_path)
 
     if not absolute_path.exists():
@@ -192,9 +199,9 @@ def prepare_image(repo_root: Path, image_path: str) -> PreparedImage:
     )
 
 
-def prepare_images(repo_root: Path, image_paths: str) -> list[PreparedImage]:
+def prepare_images(repo_root: Path, image_paths: str, images_dir: Path | None = None) -> list[PreparedImage]:
     return [
-        prepare_image(repo_root, image_path.strip())
+        prepare_image(repo_root, image_path.strip(), images_dir)
         for image_path in image_paths.split(";")
         if image_path.strip()
     ]

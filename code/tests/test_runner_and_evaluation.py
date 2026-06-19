@@ -149,6 +149,9 @@ def test_cache_rejects_unsafe_keys(tmp_path, unsafe_key):
 # Task 7: runner, retry policy, provider factory, and main CLI
 
 import csv
+import subprocess
+import sys
+from pathlib import Path
 
 from config import AppConfig
 from runner import build_provider, run_predictions
@@ -423,3 +426,50 @@ def test_run_predictions_uses_cache_for_successful_provider_result(monkeypatch, 
     assert first_rows[0]["claim_status"] == "supported"
     assert second_rows[0]["claim_status"] == "supported"
     assert len(list(paths.cache_dir.glob("*.json"))) == 1
+
+
+def test_main_cli_accepts_operational_path_and_runtime_overrides(tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    output = tmp_path / "predictions.csv"
+    log_dir = tmp_path / "custom_logs"
+    cache_dir = tmp_path / "custom_cache"
+    env_file = tmp_path / "run.env"
+    env_file.write_text("VLM_PROVIDER=openai\nVLM_MODEL=ignored-from-env\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "code/main.py",
+            "--claims",
+            str(tmp_path / "dataset" / "claims.csv"),
+            "--history",
+            str(tmp_path / "dataset" / "user_history.csv"),
+            "--evidence",
+            str(tmp_path / "dataset" / "evidence_requirements.csv"),
+            "--images",
+            str(tmp_path / "dataset" / "images"),
+            "--output",
+            str(output),
+            "--log",
+            str(log_dir),
+            "--cache",
+            str(cache_dir),
+            "--env",
+            str(env_file),
+            "--provider",
+            "none",
+            "--model",
+            "fallback-model",
+            "--retries",
+            "0",
+            "--fallback",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.exists()
+    assert (log_dir / "run.jsonl").exists()
+    assert '"retry_count"' not in (log_dir / "run.jsonl").read_text(encoding="utf-8")
