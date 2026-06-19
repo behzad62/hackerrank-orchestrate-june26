@@ -176,48 +176,19 @@ def normalize_provider_result(
         context.row.get("image_paths", ""),
     )
 
-    if not evidence_standard_met and claim_status == "supported":
+    # Do not downgrade supported/contradicted decisions to NEI here. The rules layer has
+    # access to the full provider payload and can repair evidence_standard_met, valid_image,
+    # and NEI overuse more safely.
+    if claim_status == "supported" and not evidence_standard_met:
         repairs.append(
             {
-                "field": "claim_status",
-                "original_value": claim_status,
-                "repaired_value": "not_enough_information",
-                "reason": "evidence_standard_not_met",
+                "field": "evidence_standard_met",
+                "original_value": "false",
+                "repaired_value": "true",
+                "reason": "supported_claim_implies_evidence",
             }
         )
-        claim_status = "not_enough_information"
-
-    if claim_status == "not_enough_information":
-        if supporting_image_ids != "none":
-            repairs.append(
-                {
-                    "field": "supporting_image_ids",
-                    "original_value": supporting_image_ids,
-                    "repaired_value": "none",
-                    "reason": "not_enough_information",
-                }
-            )
-            supporting_image_ids = "none"
-        if severity not in {"unknown", "none"}:
-            repairs.append(
-                {
-                    "field": "severity",
-                    "original_value": severity,
-                    "repaired_value": "unknown",
-                    "reason": "not_enough_information",
-                }
-            )
-            severity = "unknown"
-        if evidence_standard_met:
-            repairs.append(
-                {
-                    "field": "evidence_standard_met",
-                    "original_value": "true",
-                    "repaired_value": "false",
-                    "reason": "not_enough_information",
-                }
-            )
-            evidence_standard_met = False
+        evidence_standard_met = True
 
     risk_flags = merge_risk_flags(
         _normalize_risk_flags(decision.get("risk_flags")),
@@ -238,7 +209,7 @@ def normalize_provider_result(
         valid_image=valid_image,
         supporting_image_ids=supporting_image_ids,
         available_image_ids=available_image_ids,
-        raw_decision=decision,
+        raw_decision=result.raw_json,
         repairs=repairs,
     )
     issue_type = repaired.issue_type
