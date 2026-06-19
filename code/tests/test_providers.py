@@ -280,6 +280,33 @@ def test_openai_compatible_preserves_metadata_for_parse_invalid_model_json(monke
     assert result.metadata.total_tokens == 15
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}},
+        {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}},
+    ],
+)
+def test_openai_compatible_preserves_usage_for_malformed_choices(monkeypatch, payload):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(payload=payload)
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+    assert result.metadata.prompt_tokens == 7
+    assert result.metadata.completion_tokens == 3
+    assert result.metadata.total_tokens == 10
+
+
 def test_openai_compatible_marks_length_finish_reason_as_truncated(monkeypatch):
     def fake_post(url, headers, json, timeout):
         return FakeResponse(
@@ -468,6 +495,52 @@ def test_anthropic_preserves_metadata_for_parse_invalid_model_json(monkeypatch):
     assert result.raw_json == {"decision": {}}
     assert result.metadata.error_category == "json_parse_error"
     assert result.metadata.finish_reason == "end_turn"
+    assert result.metadata.prompt_tokens == 12
+    assert result.metadata.completion_tokens == 6
+    assert result.metadata.total_tokens == 18
+
+
+@pytest.mark.parametrize("content", [[], [{"type": "tool_use", "input": {}}]])
+def test_anthropic_preserves_metadata_for_malformed_content(monkeypatch, content):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "end_turn",
+                "content": content,
+                "usage": {"input_tokens": 12, "output_tokens": 6},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+    assert result.metadata.finish_reason == "end_turn"
+    assert result.metadata.prompt_tokens == 12
+    assert result.metadata.completion_tokens == 6
+    assert result.metadata.total_tokens == 18
+
+
+@pytest.mark.parametrize("content", [[], [{"type": "tool_use", "input": {}}]])
+def test_anthropic_prioritizes_max_tokens_for_malformed_content(monkeypatch, content):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "max_tokens",
+                "content": content,
+                "usage": {"input_tokens": 12, "output_tokens": 6},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "response_truncated"
+    assert result.metadata.finish_reason == "max_tokens"
     assert result.metadata.prompt_tokens == 12
     assert result.metadata.completion_tokens == 6
     assert result.metadata.total_tokens == 18

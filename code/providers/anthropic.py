@@ -113,16 +113,6 @@ class AnthropicProvider:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
-            content = data.get("content")
-            if not isinstance(content, list) or not content:
-                raise ValueError("missing content")
-            text_parts = [
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
-            ]
-            if not text_parts:
-                raise ValueError("missing text content")
             usage = data.get("usage", {})
             if not isinstance(usage, dict):
                 usage = {}
@@ -140,6 +130,16 @@ class AnthropicProvider:
                     completion_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
                 )
+            content = data.get("content")
+            if not isinstance(content, list) or not content:
+                raise ValueError("missing content")
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            ]
+            if not text_parts:
+                raise ValueError("missing text content")
             parsed = extract_json_object("\n".join(text_parts))
         except (ValueError, TypeError):
             return self._error_result(

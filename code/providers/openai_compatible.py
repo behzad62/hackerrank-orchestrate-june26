@@ -184,15 +184,15 @@ class OpenAICompatibleProvider:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
+            usage = data.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices:
                 raise ValueError("missing choices")
             choice = choices[0]
             if not isinstance(choice, dict):
                 raise ValueError("invalid choice")
-            usage = data.get("usage", {})
-            if not isinstance(usage, dict):
-                usage = {}
             finish_reason = str(choice.get("finish_reason") or "")
             if finish_reason == "length":
                 return self._error_result(
