@@ -1,6 +1,8 @@
 import base64
 import csv
 
+from PIL import Image
+
 from data import load_claim_rows, load_evidence_requirements, load_user_history, write_output_rows
 from images import (
     detect_mime_type,
@@ -100,6 +102,11 @@ def test_detect_mime_type_from_bytes():
     assert detect_mime_type(b"not-an-image") == "application/octet-stream"
 
 
+def test_detect_mime_type_finds_avif_compatible_brand_after_byte_16():
+    data = b"\x00\x00\x00\x20ftypmif1\x00\x00\x00\x00mif1avifmiaf"
+    assert detect_mime_type(data) == "image/avif"
+
+
 def test_extract_image_id_from_path():
     assert extract_image_id("images/test/case_001/img_2.jpg") == "img_2"
 
@@ -115,18 +122,29 @@ def test_resolve_image_path_supports_dataset_relative_paths(tmp_path):
 
 def test_prepare_image_returns_base64_and_hash(tmp_path):
     image = tmp_path / "img_1.jpg"
-    image.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(image, format="JPEG")
+    original_bytes = image.read_bytes()
     prepared = prepare_image(tmp_path, "img_1.jpg")
     assert prepared.image_id == "img_1"
     assert prepared.mime_type == "image/jpeg"
-    assert prepared.size_bytes == len(b"\xff\xd8\xff\xe0jpeg")
-    assert base64.b64decode(prepared.data_base64) == b"\xff\xd8\xff\xe0jpeg"
+    assert prepared.size_bytes == len(original_bytes)
+    assert base64.b64decode(prepared.data_base64) == original_bytes
     assert len(prepared.sha256) == 64
 
 
+def test_prepare_image_rejects_corrupt_jpeg_header(tmp_path):
+    image = tmp_path / "img_1.jpg"
+    image.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    prepared = prepare_image(tmp_path, "img_1.jpg")
+    assert prepared.readable is False
+    assert prepared.mime_type == "image/jpeg"
+    assert prepared.data_base64 == ""
+    assert "could not be decoded" in prepared.error
+
+
 def test_prepare_images_handles_semicolon_lists(tmp_path):
-    (tmp_path / "img_1.jpg").write_bytes(b"\xff\xd8\xff\xe0jpeg")
-    (tmp_path / "img_2.png").write_bytes(b"\x89PNG\r\n\x1a\npng")
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(tmp_path / "img_1.jpg", format="JPEG")
+    Image.new("RGB", (1, 1), color=(0, 0, 255)).save(tmp_path / "img_2.png", format="PNG")
     prepared = prepare_images(tmp_path, "img_1.jpg; img_2.png; ")
     assert [image.image_id for image in prepared] == ["img_1", "img_2"]
     assert [image.mime_type for image in prepared] == ["image/jpeg", "image/png"]
