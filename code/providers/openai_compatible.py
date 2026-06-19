@@ -12,10 +12,10 @@ from schemas import PredictionContext, ProviderMetadata, ProviderResult
 
 def categorize_http_error(status_code: int, text: str) -> str:
     lowered = (text or "").lower()
+    if status_code == 402 or "credit" in lowered or "quota" in lowered or "insufficient" in lowered:
+        return "insufficient_credit"
     if status_code in {401, 403}:
         return "auth_error"
-    if status_code == 402 or "credit" in lowered or "quota" in lowered:
-        return "insufficient_credit"
     if status_code == 408:
         return "timeout"
     if status_code == 429:
@@ -178,6 +178,8 @@ class OpenAICompatibleProvider:
                 request_id=response.headers.get("x-request-id", ""),
             )
 
+        usage: dict[str, Any] = {}
+        finish_reason = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
@@ -212,7 +214,11 @@ class OpenAICompatibleProvider:
                 category="json_parse_error",
                 latency_ms=duration_ms,
                 http_status=response.status_code,
+                finish_reason=finish_reason,
                 request_id=response.headers.get("x-request-id", ""),
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0),
             )
 
         return ProviderResult(

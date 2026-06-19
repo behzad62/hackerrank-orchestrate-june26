@@ -106,6 +106,9 @@ class AnthropicProvider:
                 request_id=response.headers.get("request-id", ""),
             )
 
+        input_tokens = 0
+        output_tokens = 0
+        stop_reason = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
@@ -143,7 +146,11 @@ class AnthropicProvider:
                 category="json_parse_error",
                 latency_ms=duration_ms,
                 http_status=response.status_code,
+                finish_reason=stop_reason,
                 request_id=response.headers.get("request-id", ""),
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
             )
         return ProviderResult(
             raw_json=parsed,
