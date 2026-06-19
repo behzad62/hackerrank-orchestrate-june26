@@ -82,6 +82,33 @@ def _write_report(
     ) / 1_000_000
     avg_latency_seconds = (sample_latency_ms / sample_model_calls / 1000) if sample_model_calls else 0.0
     estimated_runtime_seconds = avg_latency_seconds * test_model_calls
+    estimates_available = bool(sample_model_calls or not test_model_calls)
+    no_fresh_call_text = "unavailable (sample run had no fresh provider calls)"
+    projected_prompt_tokens_text = str(projected_prompt_tokens) if estimates_available else no_fresh_call_text
+    projected_completion_tokens_text = str(projected_completion_tokens) if estimates_available else no_fresh_call_text
+    estimated_cost_text = (
+        f"${estimated_cost:.4f}"
+        if estimates_available
+        else "unavailable (sample run had no fresh token baseline)"
+    )
+    observed_latency_text = f"{sample_latency_ms / 1000:.2f}s" if estimates_available else no_fresh_call_text
+    avg_latency_text = f"{avg_latency_seconds:.2f}s" if estimates_available else no_fresh_call_text
+    estimated_runtime_text = (
+        f"{estimated_runtime_seconds:.2f}s"
+        if estimates_available
+        else "unavailable (sample run had no fresh latency baseline)"
+    )
+    if estimates_available:
+        tpm_consideration = (
+            "projected full-test token volume is approximately "
+            f"{projected_prompt_tokens + projected_completion_tokens} total tokens; "
+            "configure provider TPM limits above this divided by the intended runtime window."
+        )
+    else:
+        tpm_consideration = (
+            "projected token volume is unavailable because the sample run had no fresh provider calls; "
+            "run one uncached sample pass or use provider pricing/token metadata before final cost planning."
+        )
     if provider == "none":
         fallback_note = "No VLM provider was configured, so images were not inspected and model cost is $0."
     elif fallback_used:
@@ -165,19 +192,19 @@ Observed token usage:
 - Observed average output tokens per fresh call: {avg_completion_tokens:.1f}
 
 Estimated full-test token usage and cost:
-- Projected input tokens: {projected_prompt_tokens}
-- Projected output tokens: {projected_completion_tokens}
-- Estimated full-test cost: ${estimated_cost:.4f}
+- Projected input tokens: {projected_prompt_tokens_text}
+- Projected output tokens: {projected_completion_tokens_text}
+- Estimated full-test cost: {estimated_cost_text}
 
 Latency/runtime estimate:
-- Observed total provider latency: {sample_latency_ms / 1000:.2f}s
-- Observed average latency per fresh call: {avg_latency_seconds:.2f}s
-- Estimated full-test provider runtime at current sequential settings: {estimated_runtime_seconds:.2f}s
+- Observed total provider latency: {observed_latency_text}
+- Observed average latency per fresh call: {avg_latency_text}
+- Estimated full-test provider runtime at current sequential settings: {estimated_runtime_text}
 
 Runtime and rate limits:
 - Calls are sequential by default.
 - RPM consideration: sequential execution targets at most one in-flight provider request, so effective RPM is bounded by provider latency and retry backoff rather than local parallelism.
-- TPM consideration: projected full-test token volume is approximately {projected_prompt_tokens + projected_completion_tokens} total tokens; configure provider TPM limits above this divided by the intended runtime window.
+- TPM consideration: {tpm_consideration}
 - Retry policy uses bounded retries for rate limits, server errors, timeouts, truncated responses, and JSON parse errors.
 - Cache keys include provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
 

@@ -902,6 +902,10 @@ def test_evaluation_report_estimates_test_calls_after_cache_only_sample(tmp_path
     report = report_path.read_text(encoding="utf-8")
     assert "No fresh provider calls were made in this run" in report
     assert "Expected model calls: 2" in report
+    assert "Projected input tokens: unavailable" in report
+    assert "Estimated full-test cost: unavailable" in report
+    assert "Estimated full-test provider runtime at current sequential settings: unavailable" in report
+    assert "Estimated full-test cost: $0.0000" not in report
 
 
 def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):
