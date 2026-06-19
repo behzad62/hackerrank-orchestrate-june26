@@ -23,7 +23,14 @@ def categorize_http_error(status_code: int, text: str) -> str:
         return "rate_limited"
     if status_code == 413 or "context length" in lowered or "token limit" in lowered:
         return "context_length_exceeded"
-    if "unsupported image" in lowered or "unsupported_image" in lowered:
+    if (
+        "unsupported image" in lowered
+        or "unsupported_image" in lowered
+        or "support image input" in lowered
+        or "does not support images" in lowered
+        or "does not support image" in lowered
+        or "unsupported modality" in lowered
+    ):
         return "unsupported_image"
     if status_code in {400, 415}:
         return "bad_request"
