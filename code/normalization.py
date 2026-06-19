@@ -114,7 +114,11 @@ def _supporting_ids(value: Any, image_paths: str) -> str:
         raw_ids = [str(item).strip() for item in value]
     else:
         raw_ids = []
-    ids = [image_id for image_id in raw_ids if image_id in valid_ids]
+    ids = []
+    for raw_id in raw_ids:
+        image_id = Path(raw_id).stem
+        if image_id in valid_ids:
+            ids.append(image_id)
     return ";".join(dict.fromkeys(ids)) if ids else "none"
 
 

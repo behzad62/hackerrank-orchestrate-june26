@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 
 INJECTION_PATTERNS = [
-    re.compile(r"\bignore\s+(all\s+)?previous\s+instructions\b", re.IGNORECASE),
+    re.compile(r"\bignore\s+(all\s+)?(previous|prior)\s+instructions\b", re.IGNORECASE),
+    re.compile(r"\bdisregard\s+(all\s+)?(previous|prior)\s+instructions\b", re.IGNORECASE),
+    re.compile(r"\bforget\s+(all\s+)?(previous|prior)\s+instructions\b", re.IGNORECASE),
+    re.compile(r"\boverride\s+(system|developer|previous|prior)\s+instructions\b", re.IGNORECASE),
     re.compile(r"\bapprove\s+(this\s+)?claim\b", re.IGNORECASE),
     re.compile(r"\bmark\s+(this\s+row\s+)?supported\b", re.IGNORECASE),
     re.compile(r"\breturn\s+supported\b", re.IGNORECASE),
