@@ -40,9 +40,12 @@ VLM_REASONING_ENABLED=false
 VLM_REASONING_EFFORT=low
 VLM_REASONING_MAX_TOKENS=0
 VLM_REASONING_EXCLUDE=true
+CLAIM_REVIEW_STRATEGY_MODE=one_pass
+ADJUDICATOR_PROVIDER=
+ADJUDICATOR_MODEL=
 ALLOW_NO_VISION_FALLBACK=false
 VLM_MODEL_PRICES=gemini:gemini-3.5-flash=1.50,9.00;openrouter:minimax/minimax-m3=0.30,1.20
-EVAL_STRATEGIES=openrouter-minimax=openrouter:minimax/minimax-m3;gemini-flash=gemini:gemini-3.5-flash
+EVAL_STRATEGIES=openrouter-minimax=openrouter:minimax/minimax-m3;two-pass-minimax=openrouter:minimax/minimax-m3,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3
 FINAL_STRATEGY=openrouter-minimax
 EVAL_IGNORE_CACHE=false
 CACHE_WRITE_ENABLED=true
@@ -58,7 +61,9 @@ If Gemini returns a provider `bad_request` while reasoning controls are enabled,
 
 `VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. Unlisted provider/model pairs are treated as `$0` in evaluation cost estimates until explicitly configured.
 
-`EVAL_STRATEGIES` compares multiple sample-evaluation strategies using semicolon-separated `name=provider:model` entries. Optional per-strategy overrides can be appended with commas, for example `openrouter-minimax=openrouter:minimax/minimax-m3,max_output_tokens=4096,reasoning_enabled=true`. `FINAL_STRATEGY` selects the strategy documented as the final `output.csv` strategy; if omitted, evaluation chooses the highest weighted sample score.
+`CLAIM_REVIEW_STRATEGY_MODE` accepts `one_pass` or `two_pass`. In `two_pass`, the configured VLM first extracts visual facts from images, a deterministic rule layer builds a candidate decision, and `ADJUDICATOR_PROVIDER`/`ADJUDICATOR_MODEL` runs a text-only final adjudication using the same output contract and normalizer. Two-pass mode generally costs two model calls per fresh row.
+
+`EVAL_STRATEGIES` compares multiple sample-evaluation strategies using semicolon-separated `name=provider:model` entries. Optional per-strategy overrides can be appended with commas, for example `openrouter-minimax=openrouter:minimax/minimax-m3,max_output_tokens=4096,reasoning_enabled=true`. Two-pass strategies use `mode=two_pass,adjudicator=provider:model`. `FINAL_STRATEGY` selects the strategy documented as the final `output.csv` strategy; if omitted, evaluation chooses the highest weighted sample score.
 
 `EVAL_IGNORE_CACHE=true` forces fresh provider calls during evaluation so token and latency telemetry can be refreshed. Successful provider responses are still written to cache unless `CACHE_WRITE_ENABLED=false` or `--no-cache-write` is used.
 

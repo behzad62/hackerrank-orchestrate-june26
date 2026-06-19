@@ -85,6 +85,9 @@ class AppConfig:
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
     prompt_version: str = "claim-review-v2-openrouter-cache"
+    strategy_mode: str = "one_pass"
+    adjudicator_provider: str = ""
+    adjudicator_model: str = ""
     reasoning_enabled: bool = False
     reasoning_effort: str = "low"
     reasoning_max_tokens: int = 0
@@ -116,6 +119,9 @@ class AppConfig:
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
             prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
             prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),
+            strategy_mode=os.environ.get("CLAIM_REVIEW_STRATEGY_MODE", "one_pass").strip().lower(),
+            adjudicator_provider=os.environ.get("ADJUDICATOR_PROVIDER", "").strip().lower(),
+            adjudicator_model=os.environ.get("ADJUDICATOR_MODEL", "").strip(),
             reasoning_enabled=_env_bool("VLM_REASONING_ENABLED", False),
             reasoning_effort=os.environ.get("VLM_REASONING_EFFORT", "low").strip().lower(),
             reasoning_max_tokens=int(os.environ.get("VLM_REASONING_MAX_TOKENS", "0")),
@@ -144,6 +150,9 @@ class AppConfig:
         backup_max_concurrency: int | None = None,
         prompt_cache_enabled: bool | None = None,
         prompt_cache_retention: str | None = None,
+        strategy_mode: str | None = None,
+        adjudicator_provider: str | None = None,
+        adjudicator_model: str | None = None,
         ignore_cache: bool | None = None,
         cache_write_enabled: bool | None = None,
         save_errors: bool | None = None,
@@ -180,6 +189,11 @@ class AppConfig:
             prompt_cache_retention=(
                 prompt_cache_retention if prompt_cache_retention is not None else self.prompt_cache_retention
             ).strip(),
+            strategy_mode=(strategy_mode or self.strategy_mode).strip().lower(),
+            adjudicator_provider=(
+                adjudicator_provider if adjudicator_provider is not None else self.adjudicator_provider
+            ).strip().lower(),
+            adjudicator_model=(adjudicator_model if adjudicator_model is not None else self.adjudicator_model).strip(),
             ignore_cache=ignore_cache if ignore_cache is not None else self.ignore_cache,
             cache_write_enabled=(
                 cache_write_enabled if cache_write_enabled is not None else self.cache_write_enabled
@@ -209,6 +223,9 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--prompt-cache", dest="prompt_cache_enabled", action="store_true", default=None)
     parser.add_argument("--no-prompt-cache", dest="prompt_cache_enabled", action="store_false")
     parser.add_argument("--prompt-cache-retention", default=None)
+    parser.add_argument("--strategy-mode", choices=["one_pass", "two_pass"], default=None)
+    parser.add_argument("--adjudicator-provider", choices=["openai", "openrouter", "anthropic", "gemini", "none"], default=None)
+    parser.add_argument("--adjudicator-model", default=None)
     parser.add_argument("--ignore-cache", action="store_true", default=None)
     parser.add_argument("--no-cache-write", dest="cache_write_enabled", action="store_false", default=None)
     parser.add_argument("--save-errors", action="store_true")

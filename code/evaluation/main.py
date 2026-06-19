@@ -388,23 +388,30 @@ def _format_backup_reason_lines(backup_reasons: dict[str, int]) -> str:
 
 def _format_strategy_table(results: list[StrategyResult]) -> str:
     header = (
-        "| Strategy | Provider | Model | Fresh calls | Cache hits | Fallback rows | "
+        "| Strategy | Mode | Vision Provider | Vision Model | Adjudicator | Fresh calls | Cache hits | Fallback rows | "
         "claim_status | issue_type | object_part | severity | Risk F1 | Image ID F1 | Est. full-test cost |"
     )
-    separator = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    separator = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     rows = [header, separator]
     for result in results:
         accuracy = result.metrics.get("field_accuracy", {})
         risk_scores = result.metrics.get("risk_flag_scores", {})
         image_scores = result.metrics.get("supporting_image_id_scores", {})
         summary = result.run_summary
+        adjudicator = (
+            f"{result.strategy.adjudicator_provider}/{result.strategy.adjudicator_model}"
+            if result.strategy.mode == "two_pass"
+            else "same"
+        )
         rows.append(
             "| "
             + " | ".join(
                 [
                     result.strategy.name,
+                    result.strategy.mode,
                     result.strategy.provider,
                     result.strategy.model or "none",
+                    adjudicator,
                     str(int(summary.get("model_calls") or 0)),
                     str(int(summary.get("cache_hits") or 0)),
                     str(int(summary.get("fallback_rows") or 0)),
@@ -538,6 +545,13 @@ def _write_multi_strategy_report(
     final_command = (
         "python code/main.py --env .env "
         f"--provider {final_result.strategy.provider} --model {final_result.strategy.model or 'none'} "
+        f"--strategy-mode {final_result.strategy.mode} "
+        + (
+            f"--adjudicator-provider {final_result.strategy.adjudicator_provider} "
+            f"--adjudicator-model {final_result.strategy.adjudicator_model} "
+            if final_result.strategy.mode == "two_pass"
+            else ""
+        )
         + ("--no-fallback" if not cfg.allow_no_vision_fallback else "--fallback")
     )
     report = f"""# Evaluation Report
@@ -550,8 +564,10 @@ def _write_multi_strategy_report(
 ## Final Strategy Used For output.csv
 
 - Strategy name: {final_result.strategy.name}
-- Provider: {final_result.strategy.provider}
-- Model: {final_result.strategy.model or 'none'}
+- Strategy mode: {final_result.strategy.mode}
+- Vision provider: {final_result.strategy.provider}
+- Vision model: {final_result.strategy.model or 'none'}
+- Adjudicator: {final_result.strategy.adjudicator_provider + '/' + final_result.strategy.adjudicator_model if final_result.strategy.mode == 'two_pass' else 'same as vision model'}
 - Backup chain: {_format_backup_chain(cfg)}
 - Fallback allowed for final: {str(cfg.allow_no_vision_fallback).lower()}
 - Max concurrency: {cfg.max_concurrency}
@@ -678,13 +694,14 @@ def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Pa
 def _strategy_score(metrics: dict) -> float:
     accuracy = metrics.get("field_accuracy", {})
     risk_scores = metrics.get("risk_flag_scores", {})
+    image_scores = metrics.get("supporting_image_id_scores", {})
     return (
-        0.35 * float(accuracy.get("claim_status", 0.0))
-        + 0.20 * float(accuracy.get("issue_type", 0.0))
-        + 0.20 * float(accuracy.get("object_part", 0.0))
-        + 0.10 * float(accuracy.get("evidence_standard_met", 0.0))
-        + 0.10 * float(accuracy.get("valid_image", 0.0))
-        + 0.05 * float(risk_scores.get("f1", 0.0))
+        0.30 * float(accuracy.get("claim_status", 0.0))
+        + 0.25 * float(accuracy.get("issue_type", 0.0))
+        + 0.15 * float(accuracy.get("severity", 0.0))
+        + 0.15 * float(risk_scores.get("f1", 0.0))
+        + 0.10 * float(accuracy.get("object_part", 0.0))
+        + 0.05 * float(image_scores.get("f1", 0.0))
     )
 
 
@@ -700,6 +717,9 @@ def _apply_strategy(cfg: AppConfig, strategy: EvalStrategy, run_dir: Path) -> Ap
         cfg,
         provider=strategy.provider,
         model=strategy.model,
+        strategy_mode=strategy.mode,
+        adjudicator_provider=strategy.adjudicator_provider or cfg.adjudicator_provider,
+        adjudicator_model=strategy.adjudicator_model or cfg.adjudicator_model,
         prompt_version=strategy.prompt_version or cfg.prompt_version,
         reasoning_enabled=(
             strategy.reasoning_enabled if strategy.reasoning_enabled is not None else cfg.reasoning_enabled
@@ -895,6 +915,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     model_calls = 0
     fallback_used = False
     primary_provider = "unknown"
+    saw_two_pass_stage = False
     calls_by_model: dict[tuple[str, str], dict[str, int]] = {}
     backup_reasons: dict[str, int] = {}
     primary_provider_calls = 0
@@ -910,6 +931,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             providers = set()
             model_calls = 0
             primary_provider = str(record.get("provider") or "unknown").strip().lower()
+            saw_two_pass_stage = False
             calls_by_model = {}
             backup_reasons = {}
             primary_provider_calls = 0
@@ -944,6 +966,29 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
                     primary_provider_calls += 1
                 else:
                     backup_provider_calls += 1
+        if record.get("event") == "two_pass_stage_response":
+            saw_two_pass_stage = True
+            provider = str(record.get("provider") or "").strip().lower() or "unknown"
+            model_name = str(record.get("model") or "").strip()
+            providers.add(provider)
+            if provider != "none":
+                model_calls += 1
+                if provider == primary_provider:
+                    primary_provider_calls += 1
+                else:
+                    backup_provider_calls += 1
+                key = (provider, model_name)
+                if key not in calls_by_model:
+                    calls_by_model[key] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+                calls_by_model[key]["calls"] += 1
+                calls_by_model[key]["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
+                calls_by_model[key]["completion_tokens"] += int(record.get("completion_tokens") or 0)
+                summary["prompt_tokens"] = int(summary["prompt_tokens"]) + int(record.get("prompt_tokens") or 0)
+                summary["completion_tokens"] = int(summary["completion_tokens"]) + int(record.get("completion_tokens") or 0)
+                summary["cached_tokens"] = int(summary["cached_tokens"]) + int(record.get("cached_tokens") or 0)
+                summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
+                if not record.get("error_category"):
+                    summary["token_source"] = "fresh provider metadata"
         if record.get("event") == "provider_response":
             provider = str(record.get("provider") or "").strip().lower() or "unknown"
             model_name = str(record.get("model") or "").strip()
@@ -951,7 +996,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             if record.get("used_fallback") is True:
                 fallback_used = True
                 fallback_rows += 1
-            elif provider != "none":
+            elif provider != "none" and not saw_two_pass_stage:
                 is_cache_hit = record.get("cache_hit") is True
                 if not is_cache_hit:
                     model_calls += 1
@@ -1017,6 +1062,9 @@ def main() -> int:
         backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
+        strategy_mode=args.strategy_mode,
+        adjudicator_provider=args.adjudicator_provider,
+        adjudicator_model=args.adjudicator_model,
         ignore_cache=args.ignore_cache,
         cache_write_enabled=args.cache_write_enabled,
         save_errors=args.save_errors,

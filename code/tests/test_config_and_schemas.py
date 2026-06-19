@@ -142,6 +142,32 @@ def test_config_reads_retry_and_reasoning_generation_controls(monkeypatch, tmp_p
     assert cfg.reasoning_exclude is True
 
 
+def test_config_reads_two_pass_strategy_controls(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAIM_REVIEW_STRATEGY_MODE", "two_pass")
+    monkeypatch.setenv("ADJUDICATOR_PROVIDER", "openrouter")
+    monkeypatch.setenv("ADJUDICATOR_MODEL", "minimax/minimax-m3")
+
+    cfg = AppConfig.from_env(repo_root=tmp_path)
+
+    assert cfg.strategy_mode == "two_pass"
+    assert cfg.adjudicator_provider == "openrouter"
+    assert cfg.adjudicator_model == "minimax/minimax-m3"
+
+
+def test_config_with_overrides_accepts_two_pass_strategy_controls(tmp_path):
+    cfg = AppConfig(provider="openrouter", model="minimax/minimax-m3", paths=AppPaths.from_repo_root(tmp_path))
+
+    updated = cfg.with_overrides(
+        strategy_mode="two_pass",
+        adjudicator_provider="openrouter",
+        adjudicator_model="minimax/minimax-m3",
+    )
+
+    assert updated.strategy_mode == "two_pass"
+    assert updated.adjudicator_provider == "openrouter"
+    assert updated.adjudicator_model == "minimax/minimax-m3"
+
+
 def test_config_reads_backup_chain(monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOW_BACKUP_VLM", "true")
     monkeypatch.setenv(

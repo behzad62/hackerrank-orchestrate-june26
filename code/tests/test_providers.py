@@ -202,6 +202,70 @@ def test_openai_compatible_rejects_json_without_decision_payload(monkeypatch):
     assert result.metadata.completion_tokens == 4
 
 
+def test_openai_compatible_accepts_visual_fact_payload_for_custom_prompt(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": '{"image_observations":[{"image_id":"img_1"}],"overall_visual_facts":{"claimed_damage_visible":true}}'
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 12, "total_tokens": 112},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openrouter",
+        api_key="sk-test",
+        model="model",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    context = sample_context()
+    context.row["_prompt_override_static"] = "visual facts only"
+    context.row["_prompt_override_dynamic"] = "extract facts"
+    result = provider.review_claim(context)
+
+    assert result.metadata.error_category == ""
+    assert result.raw_json["overall_visual_facts"]["claimed_damage_visible"] is True
+
+
+def test_openai_compatible_complete_json_uses_text_only_request(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"decision":{"claim_status":"supported"}}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 33, "completion_tokens": 7, "total_tokens": 40},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.complete_json("adjudicate this")
+
+    assert captured["json"]["messages"] == [{"role": "user", "content": "adjudicate this"}]
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert result.raw_json["decision"]["claim_status"] == "supported"
+    assert result.metadata.total_tokens == 40
+
+
 def test_openrouter_headers_are_included(monkeypatch):
     captured = {}
 
@@ -668,6 +732,28 @@ def test_anthropic_packages_image_blocks(monkeypatch):
     assert result.metadata.request_id == "req_ant_123"
 
 
+def test_anthropic_complete_json_uses_text_only_request(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": '{"decision":{"claim_status":"contradicted"}}'}],
+                "usage": {"input_tokens": 20, "output_tokens": 5},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.complete_json("adjudicate this")
+
+    assert captured["json"]["messages"] == [{"role": "user", "content": [{"type": "text", "text": "adjudicate this"}]}]
+    assert result.raw_json["decision"]["claim_status"] == "contradicted"
+    assert result.metadata.total_tokens == 25
+
+
 def test_anthropic_uses_static_prefix_cache_control_and_parses_usage(monkeypatch):
     captured = {}
 
@@ -986,6 +1072,33 @@ def test_gemini_packages_inline_images_and_static_system_instruction(monkeypatch
     assert result.metadata.cached_tokens == 45
     assert result.metadata.cache_hit_ratio == 0.5
     assert result.metadata.prompt_cache_key_used is True
+
+
+def test_gemini_complete_json_uses_text_only_request(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {"parts": [{"text": '{"decision":{"claim_status":"not_enough_information"}}'}]},
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 21, "candidatesTokenCount": 6, "totalTokenCount": 27},
+            }
+        )
+
+    monkeypatch.setattr("providers.gemini.requests.post", fake_post)
+    provider = GeminiProvider(api_key="gemini-test", model="gemini-3.5-flash")
+    result = provider.complete_json("adjudicate this")
+
+    assert captured["json"]["contents"] == [{"role": "user", "parts": [{"text": "adjudicate this"}]}]
+    assert captured["json"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert result.raw_json["decision"]["claim_status"] == "not_enough_information"
+    assert result.metadata.total_tokens == 27
 
 
 def test_gemini_marks_max_tokens_as_truncated(monkeypatch):

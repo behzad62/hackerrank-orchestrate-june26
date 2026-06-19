@@ -18,6 +18,7 @@ from providers import AnthropicProvider, FallbackProvider, GeminiProvider, OpenA
 from providers.openai_compatible import has_decision_payload
 from schemas import AppPaths, PredictionContext, ProviderMetadata, ProviderResult
 from security import detect_prompt_injection_flags
+from two_pass import run_two_pass_review
 
 NORMALIZER_VERSION = "normalizer-v1-cache-policy-v2"
 RETRYABLE_ERROR_CATEGORIES = {
@@ -207,6 +208,9 @@ def _effective_prompt_version(cfg: AppConfig) -> str:
         "temperature": cfg.temperature,
         "max_output_tokens": cfg.max_output_tokens,
         "provider": cfg.provider,
+        "strategy_mode": cfg.strategy_mode,
+        "adjudicator_provider": cfg.adjudicator_provider,
+        "adjudicator_model": cfg.adjudicator_model,
         "reasoning_enabled": cfg.reasoning_enabled,
         "reasoning_effort": cfg.reasoning_effort,
         "reasoning_max_tokens": cfg.reasoning_max_tokens,
@@ -429,6 +433,54 @@ def _call_provider_chain(
     raise RuntimeError(f"Provider chain failed and fallback is disabled: {category}")
 
 
+def _call_two_pass(
+    cfg: AppConfig,
+    context: PredictionContext,
+    logger: JsonlLogger,
+) -> tuple[ProviderResult, str, str, bool, str]:
+    primary_spec = ProviderSpec(provider=cfg.provider, model=cfg.model)
+    adjudicator_spec = ProviderSpec(
+        provider=(cfg.adjudicator_provider or cfg.provider),
+        model=(cfg.adjudicator_model or cfg.model),
+    )
+    visual_provider = build_provider_for_spec(cfg, primary_spec, allow_key_fallback=False)
+    adjudicator_provider = build_provider_for_spec(cfg, adjudicator_spec, allow_key_fallback=False)
+    logger.write(
+        "two_pass_started",
+        row_index=context.row_index,
+        visual_provider=primary_spec.provider,
+        visual_model=primary_spec.model,
+        adjudicator_provider=adjudicator_spec.provider,
+        adjudicator_model=adjudicator_spec.model,
+    )
+    result = run_two_pass_review(
+        context=context,
+        visual_provider=visual_provider,
+        adjudicator_provider=adjudicator_provider,
+        logger=logger,
+        max_retries=cfg.max_retries,
+    )
+    if result.metadata.error_category and cfg.allow_no_vision_fallback:
+        logger.write(
+            "provider_fallback_used",
+            row_index=context.row_index,
+            provider=primary_spec.provider,
+            error_category=result.metadata.error_category,
+        )
+        result = _fallback_result(context, primary_spec.provider, result.metadata.error_category)
+    elif result.metadata.error_category:
+        raise RuntimeError(f"Two-pass provider flow failed and fallback is disabled: {result.metadata.error_category}")
+    final_provider = result.metadata.provider or adjudicator_spec.provider
+    logger.write(
+        "two_pass_completed",
+        row_index=context.row_index,
+        final_provider=final_provider,
+        final_model=result.metadata.model or adjudicator_spec.model,
+        error_category=result.metadata.error_category,
+    )
+    return result, primary_spec.provider, final_provider, False, ""
+
+
 def _metadata_from_cache(payload: dict[str, Any]) -> ProviderMetadata:
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
@@ -595,13 +647,20 @@ def process_claim_row(
             logger.write("cache_ignored_degraded_result", row_index=row_index, provider=cfg.provider)
             cached = None
     if not cached:
-        result, primary_provider, final_provider, backup_used, backup_reason = _call_provider_chain(
-            cfg,
-            context,
-            logger,
-            provider_limiter=provider_limiter,
-            backup_semaphore=backup_semaphore,
-        )
+        if cfg.strategy_mode == "two_pass":
+            result, primary_provider, final_provider, backup_used, backup_reason = _call_two_pass(
+                cfg,
+                context,
+                logger,
+            )
+        else:
+            result, primary_provider, final_provider, backup_used, backup_reason = _call_provider_chain(
+                cfg,
+                context,
+                logger,
+                provider_limiter=provider_limiter,
+                backup_semaphore=backup_semaphore,
+            )
         if (
             cfg.cache_write_enabled
             and not backup_used
@@ -647,7 +706,7 @@ def process_claim_row(
         used_fallback=result.used_fallback,
         cache_hit=cache_hit,
     )
-    provider_calls = 0 if cache_hit or result.used_fallback else 1
+    provider_calls = 0 if cache_hit or result.used_fallback else (2 if cfg.strategy_mode == "two_pass" else 1)
     return RowResult(
         row_index=row_index,
         output_row=final_row,
@@ -703,6 +762,9 @@ def run_predictions(
         reasoning_effort=cfg.reasoning_effort,
         reasoning_max_tokens=cfg.reasoning_max_tokens,
         reasoning_exclude=cfg.reasoning_exclude,
+        strategy_mode=cfg.strategy_mode,
+        adjudicator_provider=cfg.adjudicator_provider,
+        adjudicator_model=cfg.adjudicator_model,
         max_concurrency=cfg.max_concurrency,
         requests_per_minute=cfg.requests_per_minute,
         backup_max_concurrency=cfg.backup_max_concurrency,

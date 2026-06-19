@@ -79,6 +79,17 @@ def has_decision_payload(parsed: dict[str, Any]) -> bool:
     return any(field in parsed for field in DECISION_MARKER_FIELDS)
 
 
+def has_visual_fact_payload(parsed: dict[str, Any]) -> bool:
+    observations = parsed.get("image_observations")
+    if observations is None:
+        observations = parsed.get("visual_observations")
+    return isinstance(observations, list) and isinstance(parsed.get("overall_visual_facts"), dict)
+
+
+def has_supported_json_payload(parsed: dict[str, Any]) -> bool:
+    return has_decision_payload(parsed) or has_visual_fact_payload(parsed)
+
+
 def _safe_token_count(value: Any) -> int:
     try:
         return int(value or 0)
@@ -275,6 +286,118 @@ class OpenAICompatibleProvider:
         payload[token_limit_key] = self.max_output_tokens
         if self.name == "openrouter" and self.prompt_cache_enabled:
             payload["session_id"] = "hackerrank-orchestrate-claim-review-v1"
+        reasoning_config = self._reasoning_config()
+        if reasoning_config and self.name == "openrouter":
+            payload["reasoning"] = reasoning_config
+        try:
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="timeout", latency_ms=duration_ms)
+        except requests.exceptions.RequestException:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="network_error", latency_ms=duration_ms)
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if response.status_code >= 400:
+            return self._error_result(
+                category=categorize_http_error(response.status_code, response.text),
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                request_id=response.headers.get("x-request-id", ""),
+            )
+
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        cached_tokens = 0
+        cache_write_tokens = 0
+        finish_reason = ""
+        try:
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("response JSON is not an object")
+            (
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cached_tokens,
+                cache_write_tokens,
+            ) = _normalize_openai_usage(data.get("usage"))
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("missing choices")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise ValueError("invalid choice")
+            finish_reason = str(choice.get("finish_reason") or "")
+            if finish_reason == "length":
+                return self._error_result(
+                    category="response_truncated",
+                    latency_ms=duration_ms,
+                    http_status=response.status_code,
+                    finish_reason=finish_reason,
+                    request_id=response.headers.get("x-request-id", ""),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    cached_tokens=cached_tokens,
+                    cache_write_tokens=cache_write_tokens,
+                )
+            message = choice.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                raise ValueError("missing message content")
+            parsed = extract_json_object(message["content"])
+            if not has_supported_json_payload(parsed):
+                raise ValueError("missing supported payload")
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return self._error_result(
+                category="json_parse_error",
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                finish_reason=finish_reason,
+                request_id=response.headers.get("x-request-id", ""),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cached_tokens=cached_tokens,
+                cache_write_tokens=cache_write_tokens,
+            )
+
+        return ProviderResult(
+            raw_json=parsed,
+            metadata=self._metadata(
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                response=response,
+                choice=choice,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cached_tokens=cached_tokens,
+                cache_write_tokens=cache_write_tokens,
+            ),
+        )
+
+    def complete_json(self, prompt: str) -> ProviderResult:
+        started = time.monotonic()
+        payload = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        token_limit_key = (
+            "max_completion_tokens"
+            if self.name == "openrouter" or _uses_openai_reasoning_token_limit(self.name, self.model)
+            else "max_tokens"
+        )
+        payload[token_limit_key] = self.max_output_tokens
         reasoning_config = self._reasoning_config()
         if reasoning_config and self.name == "openrouter":
             payload["reasoning"] = reasoning_config
