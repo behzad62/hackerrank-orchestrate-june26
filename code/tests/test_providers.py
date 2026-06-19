@@ -127,6 +127,7 @@ def test_openrouter_headers_are_included(monkeypatch):
 
     def fake_post(url, headers, json, timeout):
         captured["headers"] = headers
+        captured["json"] = json
         return FakeResponse(
             payload={
                 "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
@@ -145,6 +146,35 @@ def test_openrouter_headers_are_included(monkeypatch):
 
     assert captured["headers"]["HTTP-Referer"] == "https://localhost/hackerrank-orchestrate"
     assert captured["headers"]["X-Title"] == "HackerRank Orchestrate Claim Verification"
+    assert captured["json"]["max_tokens"] == 1800
+    assert "max_completion_tokens" not in captured["json"]
+
+
+@pytest.mark.parametrize("model", ["o3-mini", "gpt-5"])
+def test_openai_reasoning_models_use_max_completion_tokens(monkeypatch, model):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model=model,
+        base_url="https://api.openai.com/v1",
+        max_output_tokens=1200,
+    )
+    provider.review_claim(sample_context())
+
+    assert captured["json"]["max_completion_tokens"] == 1200
+    assert "max_tokens" not in captured["json"]
 
 
 def test_openai_compatible_returns_error_metadata(monkeypatch):

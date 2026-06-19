@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -68,6 +69,13 @@ def _normalize_openai_usage(usage: Any) -> tuple[int, int, int]:
         _safe_token_count(usage.get("completion_tokens")),
         _safe_token_count(usage.get("total_tokens")),
     )
+
+
+def _uses_openai_reasoning_token_limit(provider: str, model: str) -> bool:
+    if provider != "openai":
+        return False
+    model_slug = (model or "").lower()
+    return bool(re.match(r"^o\d", model_slug)) or model_slug.startswith("gpt-5")
 
 
 class OpenAICompatibleProvider:
@@ -170,10 +178,15 @@ class OpenAICompatibleProvider:
         payload = {
             "model": self.model,
             "temperature": self.temperature,
-            "max_tokens": self.max_output_tokens,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "user", "content": self._content(context)}],
         }
+        token_limit_key = (
+            "max_completion_tokens"
+            if _uses_openai_reasoning_token_limit(self.name, self.model)
+            else "max_tokens"
+        )
+        payload[token_limit_key] = self.max_output_tokens
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
