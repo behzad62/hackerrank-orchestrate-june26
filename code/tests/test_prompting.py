@@ -52,6 +52,15 @@ def test_prompt_includes_allowed_values_for_row():
     assert "medium" in prompt
 
 
+def test_laptop_prompt_contract_does_not_include_car_only_object_part():
+    context = PredictionContext(row_index=5, row={"claim_object": "laptop"})
+    prompt = build_text_prompt(context)
+    assert "object_part for this row" in prompt
+    assert "screen" in prompt
+    assert "keyboard" in prompt
+    assert "front_bumper" not in prompt
+
+
 def test_prompt_includes_context_and_image_metadata_without_base64_bytes():
     context = PredictionContext(
         row_index=3,
