@@ -155,6 +155,7 @@ def test_cache_rejects_unsafe_keys(tmp_path, unsafe_key):
 # Task 7: runner, retry policy, provider factory, and main CLI
 
 import csv
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -162,6 +163,8 @@ from pathlib import Path
 from config import AppConfig
 from runner import build_provider, run_predictions
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
+
+from evaluation.metrics import compare_rows, risk_flag_scores, write_errors_csv
 
 
 def write_task7_minimal_dataset(root, user_claim="screen cracked"):
@@ -552,3 +555,150 @@ def test_main_cli_accepts_operational_path_and_runtime_overrides(tmp_path):
     assert output.exists()
     assert (log_dir / "run.jsonl").exists()
     assert '"retry_count"' not in (log_dir / "run.jsonl").read_text(encoding="utf-8")
+
+
+# Task 8: evaluation metrics, error report, and operational report
+
+
+def test_compare_rows_computes_field_accuracy_and_errors():
+    expected = [
+        {
+            "user_id": "u1",
+            "image_paths": "images/sample/case_001/img_1.jpg",
+            "user_claim": "scratch",
+            "claim_object": "car",
+            "claim_status": "supported",
+            "risk_flags": "none",
+            "supporting_image_ids": "img_1",
+        },
+        {
+            "user_id": "u2",
+            "image_paths": "images/sample/case_002/img_1.jpg",
+            "user_claim": "dent",
+            "claim_object": "car",
+            "claim_status": "contradicted",
+            "risk_flags": "damage_not_visible;manual_review_required",
+            "supporting_image_ids": "none",
+        },
+    ]
+    predicted = [
+        {
+            "user_id": "u1",
+            "image_paths": "images/sample/case_001/img_1.jpg",
+            "user_claim": "scratch",
+            "claim_object": "car",
+            "claim_status": "supported",
+            "risk_flags": "none",
+            "supporting_image_ids": "img_1",
+        },
+        {
+            "user_id": "u2",
+            "image_paths": "images/sample/case_002/img_1.jpg",
+            "user_claim": "dent",
+            "claim_object": "car",
+            "claim_status": "supported",
+            "risk_flags": "damage_not_visible",
+            "supporting_image_ids": "none",
+        },
+    ]
+
+    metrics, errors = compare_rows(
+        expected,
+        predicted,
+        fields=["claim_status", "risk_flags", "supporting_image_ids"],
+    )
+
+    assert metrics["rows_compared"] == 2
+    assert metrics["field_accuracy"]["claim_status"] == 0.5
+    assert metrics["field_accuracy"]["risk_flags"] == 0.5
+    assert metrics["field_accuracy"]["supporting_image_ids"] == 1.0
+    assert len(errors) == 2
+    assert errors[0]["row_index"] == "2"
+    assert errors[0]["user_id"] == "u2"
+    assert {error["field"] for error in errors} == {"claim_status", "risk_flags"}
+
+
+def test_risk_flag_scores_are_set_based_precision_recall_f1():
+    scores = risk_flag_scores(
+        expected=["damage_not_visible;manual_review_required"],
+        predicted=["damage_not_visible;text_instruction_present"],
+    )
+
+    assert round(scores["precision"], 3) == 0.5
+    assert round(scores["recall"], 3) == 0.5
+    assert round(scores["f1"], 3) == 0.5
+
+
+def test_write_errors_csv_outputs_expected_columns(tmp_path):
+    output = tmp_path / "errors.csv"
+    write_errors_csv(
+        output,
+        [
+            {
+                "row_index": "1",
+                "field": "claim_status",
+                "expected": "supported",
+                "predicted": "contradicted",
+            }
+        ],
+    )
+
+    with output.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+
+    assert "model_summary" in reader.fieldnames
+    assert rows[0]["field"] == "claim_status"
+    assert rows[0]["expected"] == "supported"
+    assert rows[0]["predicted"] == "contradicted"
+
+
+def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    env = {
+        **dict(os.environ),
+        "VLM_PROVIDER": "none",
+        "ALLOW_NO_VISION_FALLBACK": "true",
+        "VLM_CACHE_DIR": str(tmp_path / "cache"),
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "code/evaluation/main.py",
+            "--sample",
+            str(tmp_path / "dataset" / "sample_claims.csv"),
+            "--claims",
+            str(tmp_path / "dataset" / "claims.csv"),
+            "--history",
+            str(tmp_path / "dataset" / "user_history.csv"),
+            "--evidence",
+            str(tmp_path / "dataset" / "evidence_requirements.csv"),
+            "--images",
+            str(tmp_path / "dataset" / "images"),
+            "--provider",
+            "none",
+            "--fallback",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    evaluation_dir = Path(__file__).resolve().parents[1] / "evaluation"
+    predictions_path = evaluation_dir / "sample_predictions.csv"
+    errors_path = evaluation_dir / "errors.csv"
+    metrics_path = evaluation_dir / "metrics.json"
+    report_path = evaluation_dir / "evaluation_report.md"
+    for path in [predictions_path, errors_path, metrics_path, report_path]:
+        assert path.exists(), path
+
+    with predictions_path.open(newline="", encoding="utf-8") as handle:
+        assert csv.DictReader(handle).fieldnames == OUTPUT_COLUMNS
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics["rows_compared"] == 1
+    report = report_path.read_text(encoding="utf-8")
+    assert "images were not inspected" in report
+    assert "cost is $0" in report
