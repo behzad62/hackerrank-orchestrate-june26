@@ -6,6 +6,7 @@ from schemas import (
     ALLOWED_ISSUE_TYPES,
     ALLOWED_OBJECT_PARTS,
     ALLOWED_RISK_FLAGS,
+    ALLOWED_SEVERITY,
     OUTPUT_COLUMNS,
     AppPaths,
     bool_to_csv,
@@ -33,11 +34,73 @@ def test_output_columns_match_problem_statement_order():
 
 def test_allowed_values_include_required_enums():
     assert ALLOWED_CLAIM_STATUS == {"supported", "contradicted", "not_enough_information"}
-    assert {"dent", "scratch", "glass_shatter", "unknown"}.issubset(ALLOWED_ISSUE_TYPES)
-    assert "text_instruction_present" in ALLOWED_RISK_FLAGS
-    assert ALLOWED_OBJECT_PARTS["car"] >= {"front_bumper", "rear_bumper", "unknown"}
-    assert ALLOWED_OBJECT_PARTS["laptop"] >= {"screen", "keyboard", "unknown"}
-    assert ALLOWED_OBJECT_PARTS["package"] >= {"box", "seal", "unknown"}
+    assert ALLOWED_ISSUE_TYPES == {
+        "dent",
+        "scratch",
+        "crack",
+        "glass_shatter",
+        "broken_part",
+        "missing_part",
+        "torn_packaging",
+        "crushed_packaging",
+        "water_damage",
+        "stain",
+        "none",
+        "unknown",
+    }
+    assert ALLOWED_RISK_FLAGS == {
+        "none",
+        "blurry_image",
+        "cropped_or_obstructed",
+        "low_light_or_glare",
+        "wrong_angle",
+        "wrong_object",
+        "wrong_object_part",
+        "damage_not_visible",
+        "claim_mismatch",
+        "possible_manipulation",
+        "non_original_image",
+        "text_instruction_present",
+        "user_history_risk",
+        "manual_review_required",
+    }
+    assert ALLOWED_OBJECT_PARTS["car"] == {
+        "front_bumper",
+        "rear_bumper",
+        "door",
+        "hood",
+        "windshield",
+        "side_mirror",
+        "headlight",
+        "taillight",
+        "fender",
+        "quarter_panel",
+        "body",
+        "unknown",
+    }
+    assert ALLOWED_OBJECT_PARTS["laptop"] == {
+        "screen",
+        "keyboard",
+        "trackpad",
+        "hinge",
+        "lid",
+        "corner",
+        "port",
+        "base",
+        "body",
+        "unknown",
+    }
+    assert ALLOWED_OBJECT_PARTS["package"] == {
+        "box",
+        "package_corner",
+        "package_side",
+        "seal",
+        "label",
+        "contents",
+        "item",
+        "unknown",
+    }
+    assert ALLOWED_SEVERITY == {"none", "low", "medium", "high", "unknown"}
 
 
 def test_bool_to_csv_lowercase_strings():
