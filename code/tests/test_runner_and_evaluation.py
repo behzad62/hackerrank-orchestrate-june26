@@ -676,6 +676,8 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
             str(tmp_path / "dataset" / "evidence_requirements.csv"),
             "--images",
             str(tmp_path / "dataset" / "images"),
+            "--output",
+            str(tmp_path / "evaluation" / "sample_predictions.csv"),
             "--provider",
             "none",
             "--fallback",
@@ -687,7 +689,7 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
     )
 
     assert result.returncode == 0, result.stderr
-    evaluation_dir = Path(__file__).resolve().parents[1] / "evaluation"
+    evaluation_dir = tmp_path / "evaluation"
     predictions_path = evaluation_dir / "sample_predictions.csv"
     errors_path = evaluation_dir / "errors.csv"
     metrics_path = evaluation_dir / "metrics.json"

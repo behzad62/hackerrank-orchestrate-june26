@@ -165,8 +165,11 @@ def main() -> int:
         raise ValueError("AppConfig.paths is required")
 
     paths = cfg.paths
-    evaluation_dir = Path(__file__).resolve().parent
-    sample_predictions_path = evaluation_dir / "sample_predictions.csv"
+    default_evaluation_dir = Path(__file__).resolve().parent
+    sample_predictions_path = (
+        paths.output_csv if args.output is not None else default_evaluation_dir / "sample_predictions.csv"
+    )
+    evaluation_dir = sample_predictions_path.parent
     errors_path = evaluation_dir / "errors.csv"
     metrics_path = evaluation_dir / "metrics.json"
     report_path = evaluation_dir / "evaluation_report.md"
