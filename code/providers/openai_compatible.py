@@ -103,6 +103,9 @@ class OpenAICompatibleProvider:
         http_status: int = 0,
         finish_reason: str = "",
         request_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
     ) -> ProviderResult:
         return ProviderResult(
             raw_json={"decision": {}},
@@ -110,6 +113,9 @@ class OpenAICompatibleProvider:
                 provider=self.name,
                 model=self.model,
                 latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 finish_reason=finish_reason,
                 request_id=request_id,
                 http_status=http_status,
@@ -180,12 +186,24 @@ class OpenAICompatibleProvider:
             choice = choices[0]
             if not isinstance(choice, dict):
                 raise ValueError("invalid choice")
-            message = choice.get("message")
-            if not isinstance(message, dict) or not isinstance(message.get("content"), str):
-                raise ValueError("missing message content")
             usage = data.get("usage", {})
             if not isinstance(usage, dict):
                 usage = {}
+            finish_reason = str(choice.get("finish_reason") or "")
+            if finish_reason == "length":
+                return self._error_result(
+                    category="response_truncated",
+                    latency_ms=duration_ms,
+                    http_status=response.status_code,
+                    finish_reason=finish_reason,
+                    request_id=response.headers.get("x-request-id", ""),
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
+                    total_tokens=int(usage.get("total_tokens") or 0),
+                )
+            message = choice.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                raise ValueError("missing message content")
             parsed = extract_json_object(message["content"])
         except (ValueError, TypeError, json.JSONDecodeError):
             return self._error_result(

@@ -271,6 +271,35 @@ def test_openai_compatible_marks_length_finish_reason_as_truncated(monkeypatch):
     assert result.metadata.error_category == "response_truncated"
 
 
+def test_openai_compatible_prioritizes_length_over_incomplete_json(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"decision":{"claim_status":"supported"'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "response_truncated"
+    assert result.metadata.finish_reason == "length"
+    assert result.metadata.total_tokens == 15
+
+
 def test_anthropic_packages_image_blocks(monkeypatch):
     captured = {}
 
@@ -399,3 +428,23 @@ def test_anthropic_marks_max_tokens_stop_reason_as_truncated(monkeypatch):
 
     assert result.metadata.finish_reason == "max_tokens"
     assert result.metadata.error_category == "response_truncated"
+
+
+def test_anthropic_prioritizes_max_tokens_over_incomplete_json(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "max_tokens",
+                "content": [{"type": "text", "text": '{"decision":{"claim_status":"supported"'}],
+                "usage": {"input_tokens": 12, "output_tokens": 6},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "response_truncated"
+    assert result.metadata.finish_reason == "max_tokens"
+    assert result.metadata.total_tokens == 18

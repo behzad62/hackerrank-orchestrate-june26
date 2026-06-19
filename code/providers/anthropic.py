@@ -52,6 +52,9 @@ class AnthropicProvider:
         http_status: int = 0,
         finish_reason: str = "",
         request_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
     ) -> ProviderResult:
         return ProviderResult(
             raw_json={"decision": {}},
@@ -59,6 +62,9 @@ class AnthropicProvider:
                 provider=self.name,
                 model=self.model,
                 latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 finish_reason=finish_reason,
                 request_id=request_id,
                 http_status=http_status,
@@ -118,6 +124,17 @@ class AnthropicProvider:
             input_tokens = int(usage.get("input_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or 0)
             stop_reason = str(data.get("stop_reason") or "")
+            if stop_reason == "max_tokens":
+                return self._error_result(
+                    category="response_truncated",
+                    latency_ms=duration_ms,
+                    http_status=response.status_code,
+                    finish_reason=stop_reason,
+                    request_id=response.headers.get("request-id", ""),
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                )
             parsed = extract_json_object("\n".join(text_parts))
         except (ValueError, TypeError):
             return self._error_result(
