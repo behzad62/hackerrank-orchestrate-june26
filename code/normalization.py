@@ -186,6 +186,17 @@ def normalize_provider_result(
         )
         severity = "none"
 
+    if not evidence_standard_met and claim_status != "not_enough_information":
+        repairs.append(
+            {
+                "field": "claim_status",
+                "original_value": claim_status,
+                "repaired_value": "not_enough_information",
+                "reason": "evidence_standard_not_met",
+            }
+        )
+        claim_status = "not_enough_information"
+
     if claim_status == "not_enough_information":
         if supporting_image_ids != "none":
             repairs.append(

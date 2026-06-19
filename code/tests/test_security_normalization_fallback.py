@@ -226,3 +226,77 @@ def test_normalization_consistency_for_not_enough_information_preserves_valid_im
         "supporting_image_ids",
         "severity",
     }
+
+
+def test_normalization_demotes_supported_when_evidence_not_met():
+    context = PredictionContext(
+        row_index=4,
+        row={
+            "user_id": "u4",
+            "image_paths": "images/test/case_004/img_1.jpg",
+            "user_claim": "door dent",
+            "claim_object": "car",
+        },
+    )
+    raw = {
+        "decision": {
+            "evidence_standard_met": False,
+            "evidence_standard_met_reason": "The image is too cropped to evaluate the door.",
+            "risk_flags": ["cropped_or_obstructed"],
+            "issue_type": "dent",
+            "object_part": "door",
+            "claim_status": "supported",
+            "claim_status_justification": "Provider mistakenly supported despite insufficient evidence.",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "high",
+        }
+    }
+    result = ProviderResult(raw_json=raw, metadata=ProviderMetadata(provider="test", model="model"))
+    row, repairs = normalize_provider_result(context, result)
+    assert row["evidence_standard_met"] == "false"
+    assert row["claim_status"] == "not_enough_information"
+    assert row["supporting_image_ids"] == "none"
+    assert row["severity"] == "unknown"
+    assert {repair["field"] for repair in repairs} >= {
+        "claim_status",
+        "supporting_image_ids",
+        "severity",
+    }
+
+
+def test_normalization_demotes_contradicted_when_evidence_not_met():
+    context = PredictionContext(
+        row_index=5,
+        row={
+            "user_id": "u5",
+            "image_paths": "images/test/case_005/img_1.jpg",
+            "user_claim": "front bumper scratch",
+            "claim_object": "car",
+        },
+    )
+    raw = {
+        "decision": {
+            "evidence_standard_met": False,
+            "evidence_standard_met_reason": "The front bumper is not visible.",
+            "risk_flags": ["wrong_object_part"],
+            "issue_type": "scratch",
+            "object_part": "front_bumper",
+            "claim_status": "contradicted",
+            "claim_status_justification": "Provider mistakenly contradicted despite insufficient evidence.",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "medium",
+        }
+    }
+    result = ProviderResult(raw_json=raw, metadata=ProviderMetadata(provider="test", model="model"))
+    row, repairs = normalize_provider_result(context, result)
+    assert row["evidence_standard_met"] == "false"
+    assert row["claim_status"] == "not_enough_information"
+    assert row["supporting_image_ids"] == "none"
+    assert row["severity"] == "unknown"
+    assert {repair["field"] for repair in repairs} >= {
+        "claim_status",
+        "supporting_image_ids",
+        "severity",
+    }
