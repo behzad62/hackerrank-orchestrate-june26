@@ -173,7 +173,7 @@ import sys
 from pathlib import Path
 
 from config import AppConfig
-from runner import build_provider, run_predictions
+from runner import _effective_prompt_version, _sleep_seconds, build_provider, run_predictions
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
 from evaluation.metrics import (
@@ -218,6 +218,51 @@ def test_build_provider_none(tmp_path):
     cfg = AppConfig(provider="none", model="", paths=paths)
     provider = build_provider(cfg)
     assert provider.name == "none"
+
+
+def test_build_provider_passes_gemini_thinking_level(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        gemini_thinking_level="low",
+        paths=paths,
+    )
+
+    provider = build_provider(cfg)
+
+    assert provider.name == "gemini"
+    assert provider.thinking_level == "low"
+
+
+def test_sleep_seconds_uses_configurable_cap():
+    assert _sleep_seconds(0, 45) == 1
+    assert _sleep_seconds(5, 45) == 32
+    assert _sleep_seconds(8, 45) == 45
+    assert _sleep_seconds(8, 0) == 1
+
+
+def test_effective_prompt_version_includes_generation_settings(tmp_path):
+    paths = AppPaths.from_repo_root(tmp_path)
+    low = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_output_tokens=4096,
+        gemini_thinking_level="low",
+        paths=paths,
+    )
+    medium = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_output_tokens=4096,
+        gemini_thinking_level="medium",
+        paths=paths,
+    )
+
+    assert _effective_prompt_version(low) != _effective_prompt_version(medium)
+    assert "max_output_tokens=4096" in _effective_prompt_version(low)
+    assert "gemini_thinking_level=low" in _effective_prompt_version(low)
 
 
 @pytest.mark.parametrize(

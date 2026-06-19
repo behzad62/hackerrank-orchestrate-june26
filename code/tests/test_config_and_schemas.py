@@ -118,6 +118,18 @@ def test_config_defaults_to_honest_none_provider(monkeypatch, tmp_path):
     assert cfg.paths.output_csv == tmp_path / "output.csv"
 
 
+def test_config_reads_retry_and_gemini_generation_controls(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLM_RETRY_MAX_SLEEP_SECONDS", "45")
+    monkeypatch.setenv("VLM_MAX_OUTPUT_TOKENS", "4096")
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "low")
+
+    cfg = AppConfig.from_env(repo_root=tmp_path)
+
+    assert cfg.retry_max_sleep_seconds == 45
+    assert cfg.max_output_tokens == 4096
+    assert cfg.gemini_thinking_level == "low"
+
+
 def test_cli_overrides_env_paths(tmp_path):
     paths = AppPaths.from_repo_root(tmp_path)
     cfg = AppConfig(provider="none", model="", paths=paths)

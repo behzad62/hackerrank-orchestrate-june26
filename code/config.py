@@ -35,12 +35,14 @@ class AppConfig:
     model: str
     temperature: float = 0.0
     max_retries: int = 2
+    retry_max_sleep_seconds: int = 8
     timeout_seconds: int = 90
     allow_no_vision_fallback: bool = True
     max_output_tokens: int = 1800
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
     prompt_version: str = "claim-review-v2-openrouter-cache"
+    gemini_thinking_level: str = "medium"
     paths: AppPaths | None = None
 
     @classmethod
@@ -55,11 +57,13 @@ class AppConfig:
             model=os.environ.get("VLM_MODEL", "").strip(),
             temperature=float(os.environ.get("VLM_TEMPERATURE", "0")),
             max_retries=int(os.environ.get("VLM_MAX_RETRIES", "2")),
+            retry_max_sleep_seconds=int(os.environ.get("VLM_RETRY_MAX_SLEEP_SECONDS", "8")),
             timeout_seconds=int(os.environ.get("VLM_TIMEOUT_SECONDS", "90")),
             allow_no_vision_fallback=_env_bool("ALLOW_NO_VISION_FALLBACK", True),
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
             prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
             prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),
+            gemini_thinking_level=os.environ.get("GEMINI_THINKING_LEVEL", "medium").strip().lower(),
             paths=paths,
         )
 

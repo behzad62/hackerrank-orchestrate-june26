@@ -92,6 +92,7 @@ def build_provider(cfg: AppConfig):
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,
             prompt_cache_retention=cfg.prompt_cache_retention,
+            thinking_level=cfg.gemini_thinking_level,
         )
     raise ValueError(f"Unsupported provider: {cfg.provider}")
 
@@ -115,8 +116,19 @@ def _exception_category(exc: Exception) -> str:
     return "unknown_provider_error"
 
 
-def _sleep_seconds(attempt: int) -> int:
-    return min(8, 2**attempt)
+def _sleep_seconds(attempt: int, max_sleep_seconds: int) -> int:
+    return min(max(1, max_sleep_seconds), 2**attempt)
+
+
+def _effective_prompt_version(cfg: AppConfig) -> str:
+    generation_settings = {
+        "prompt_version": cfg.prompt_version,
+        "temperature": cfg.temperature,
+        "max_output_tokens": cfg.max_output_tokens,
+        "provider": cfg.provider,
+        "gemini_thinking_level": cfg.gemini_thinking_level if cfg.provider == "gemini" else "",
+    }
+    return "|".join(f"{key}={value}" for key, value in generation_settings.items())
 
 
 def _call_with_retries(provider: Any, context: PredictionContext, cfg: AppConfig, logger: JsonlLogger) -> ProviderResult:
@@ -158,7 +170,7 @@ def _call_with_retries(provider: Any, context: PredictionContext, cfg: AppConfig
         )
         if category not in RETRYABLE_ERROR_CATEGORIES or attempt >= cfg.max_retries:
             break
-        sleep_seconds = _sleep_seconds(attempt)
+        sleep_seconds = _sleep_seconds(attempt, cfg.retry_max_sleep_seconds)
         logger.write(
             "provider_retry_scheduled",
             row_index=context.row_index,
@@ -289,6 +301,9 @@ def run_predictions(
         fallback_allowed=cfg.allow_no_vision_fallback,
         prompt_cache_enabled=cfg.prompt_cache_enabled,
         prompt_cache_retention=cfg.prompt_cache_retention,
+        output_limit=cfg.max_output_tokens,
+        retry_max_sleep_seconds=cfg.retry_max_sleep_seconds,
+        gemini_thinking_level=cfg.gemini_thinking_level if cfg.provider == "gemini" else "",
     )
 
     for row_index, row in enumerate(claim_rows, start=1):
@@ -328,7 +343,7 @@ def run_predictions(
         cache_key = build_cache_key(
             provider=provider_name,
             model=cfg.model,
-            prompt_version=cfg.prompt_version,
+            prompt_version=_effective_prompt_version(cfg),
             row=row,
             user_history=history,
             evidence_requirements=requirements,
