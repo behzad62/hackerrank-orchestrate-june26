@@ -25,6 +25,9 @@ def main() -> int:
         backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
+        strategy_mode=args.strategy_mode,
+        adjudicator_provider=args.adjudicator_provider,
+        adjudicator_model=args.adjudicator_model,
         ignore_cache=args.ignore_cache,
         cache_write_enabled=args.cache_write_enabled,
     )

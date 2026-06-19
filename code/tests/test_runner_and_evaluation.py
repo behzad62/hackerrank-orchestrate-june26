@@ -238,6 +238,9 @@ from evaluation.metrics import (
     write_errors_csv,
 )
 from evaluation.main import (
+    StrategyResult,
+    TokenEstimate,
+    _format_strategy_table,
     _latest_run_provider_summary,
     _price_for_model,
     _price_warning,
@@ -1044,6 +1047,107 @@ def test_run_predictions_uses_cache_for_successful_provider_result(monkeypatch, 
     assert len(list(paths.cache_dir.glob("*.json"))) == 1
 
 
+def test_run_predictions_two_pass_uses_visual_pass_and_text_adjudicator(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path, user_claim="screen cracked")
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openrouter",
+        model="vision-model",
+        strategy_mode="two_pass",
+        adjudicator_provider="openrouter",
+        adjudicator_model="adjudicator-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class VisualProvider:
+        name = "openrouter"
+        model = "vision-model"
+
+        def __init__(self):
+            self.review_calls = 0
+
+        def review_claim(self, context):
+            self.review_calls += 1
+            assert "Pass 1 extracts visual facts only" in context.row["_prompt_override_static"]
+            return ProviderResult(
+                raw_json={
+                    "image_observations": [
+                        {
+                            "image_id": "img_1",
+                            "usable_for_review": True,
+                            "visible_object_type": "laptop",
+                            "visible_parts": ["screen"],
+                            "visible_damage": ["crack on screen"],
+                            "claimed_damage_visible": True,
+                            "relevant_part_visible": True,
+                        }
+                    ],
+                    "overall_visual_facts": {
+                        "relevant_object_visible": True,
+                        "relevant_part_visible": True,
+                        "claimed_damage_visible": True,
+                        "visible_mismatch": False,
+                    },
+                },
+                metadata=ProviderMetadata(provider="openrouter", model="vision-model", prompt_tokens=100, completion_tokens=40),
+            )
+
+    class AdjudicatorProvider:
+        name = "openrouter"
+        model = "adjudicator-model"
+
+        def __init__(self):
+            self.complete_calls = 0
+
+        def complete_json(self, prompt):
+            self.complete_calls += 1
+            assert "Final text-only adjudication" in prompt
+            assert "visual_facts" in prompt
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The visual facts show the screen crack.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 shows the cracked screen.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openrouter", model="adjudicator-model", prompt_tokens=80, completion_tokens=20),
+            )
+
+    visual = VisualProvider()
+    adjudicator = AdjudicatorProvider()
+
+    def fake_build_provider(config, spec, allow_key_fallback=False):
+        model = spec.model if hasattr(spec, "model") else spec[1]
+        return adjudicator if model == "adjudicator-model" else visual
+
+    monkeypatch.setattr("runner.build_provider_for_spec", fake_build_provider)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert visual.review_calls == 1
+    assert adjudicator.complete_calls == 1
+    assert rows[0]["claim_status"] == "supported"
+    assert rows[0]["supporting_image_ids"] == "img_1"
+    records = [
+        json.loads(line)
+        for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    stage_events = [record for record in records if record["event"] == "two_pass_stage_response"]
+    assert [record["stage"] for record in stage_events] == ["visual_facts", "adjudicator"]
+    run_completed = [record for record in records if record["event"] == "run_completed"][-1]
+    assert run_completed["provider_calls"] == 2
+
+
 def test_run_predictions_ignore_cache_bypasses_reads_but_writes(monkeypatch, tmp_path):
     write_task7_minimal_dataset(tmp_path)
     paths = AppPaths.from_repo_root(tmp_path)
@@ -1553,6 +1657,42 @@ def test_parse_eval_strategies_from_env_and_cli():
     assert strategies[2].max_output_tokens == 2048
 
 
+def test_parse_eval_strategy_supports_mode_and_adjudicator():
+    strategies = parse_strategies(
+        [
+            "two-pass-minimax=openrouter:minimax/minimax-m3,"
+            "mode=two_pass,adjudicator=openrouter:minimax/minimax-m3"
+        ]
+    )
+
+    strategy = strategies[0]
+    assert strategy.mode == "two_pass"
+    assert strategy.provider == "openrouter"
+    assert strategy.model == "minimax/minimax-m3"
+    assert strategy.adjudicator_provider == "openrouter"
+    assert strategy.adjudicator_model == "minimax/minimax-m3"
+
+
+def test_parse_eval_strategy_rejects_invalid_mode():
+    with pytest.raises(ValueError, match="Invalid strategy mode"):
+        parse_strategies(["bad=openrouter:minimax/minimax-m3,mode=three_pass"])
+
+
+def test_effective_prompt_version_includes_strategy_mode_and_adjudicator(tmp_path):
+    base = AppConfig(provider="openrouter", model="minimax/minimax-m3", paths=AppPaths.from_repo_root(tmp_path))
+    one_pass = base.with_overrides(strategy_mode="one_pass")
+    two_pass = base.with_overrides(
+        strategy_mode="two_pass",
+        adjudicator_provider="openrouter",
+        adjudicator_model="minimax/minimax-m3",
+    )
+
+    assert _effective_prompt_version(one_pass) != _effective_prompt_version(two_pass)
+    assert "strategy_mode=two_pass" in _effective_prompt_version(two_pass)
+    assert "adjudicator_provider=openrouter" in _effective_prompt_version(two_pass)
+    assert "adjudicator_model=minimax/minimax-m3" in _effective_prompt_version(two_pass)
+
+
 def test_parse_eval_strategies_rejects_duplicate_names():
     with pytest.raises(ValueError, match="Duplicate strategy name"):
         parse_strategies(
@@ -1619,6 +1759,112 @@ def test_latest_run_provider_summary_counts_failed_provider_attempts(tmp_path):
     assert summary["observed_provider"] == "openai"
     assert summary["fallback_used"] is False
     assert summary["model_calls"] == 2
+
+
+def test_latest_run_provider_summary_counts_two_pass_stage_tokens(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "run_started", "provider": "openrouter", "strategy_mode": "two_pass"}),
+                json.dumps(
+                    {
+                        "event": "two_pass_stage_response",
+                        "stage": "visual_facts",
+                        "provider": "openrouter",
+                        "model": "vision-model",
+                        "prompt_tokens": 100,
+                        "completion_tokens": 40,
+                        "duration_ms": 1000,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "two_pass_stage_response",
+                        "stage": "adjudicator",
+                        "provider": "openrouter",
+                        "model": "adjudicator-model",
+                        "prompt_tokens": 80,
+                        "completion_tokens": 20,
+                        "duration_ms": 500,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "provider_response",
+                        "provider": "openrouter",
+                        "model": "adjudicator-model",
+                        "prompt_tokens": 180,
+                        "completion_tokens": 60,
+                        "duration_ms": 1500,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_run_provider_summary(log_path)
+
+    assert summary["model_calls"] == 2
+    assert summary["prompt_tokens"] == 180
+    assert summary["completion_tokens"] == 60
+    assert summary["latency_ms"] == 1500
+    assert summary["calls_by_model"][("openrouter", "vision-model")] == {
+        "calls": 1,
+        "prompt_tokens": 100,
+        "completion_tokens": 40,
+    }
+    assert summary["calls_by_model"][("openrouter", "adjudicator-model")] == {
+        "calls": 1,
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+    }
+
+
+def test_strategy_table_shows_mode_and_adjudicator(tmp_path):
+    strategy = EvalStrategy(
+        name="two-pass",
+        provider="openrouter",
+        model="vision-model",
+        mode="two_pass",
+        adjudicator_provider="openrouter",
+        adjudicator_model="adjudicator-model",
+    )
+    result = StrategyResult(
+        strategy=strategy,
+        run_dir=tmp_path,
+        predictions_path=tmp_path / "pred.csv",
+        errors_path=tmp_path / "errors.csv",
+        metrics_path=tmp_path / "metrics.json",
+        log_path=tmp_path / "run.jsonl",
+        metrics={
+            "field_accuracy": {"claim_status": 1, "issue_type": 1, "object_part": 1, "severity": 1},
+            "risk_flag_scores": {"f1": 1},
+            "supporting_image_id_scores": {"f1": 1},
+        },
+        errors=[],
+        run_summary={"model_calls": 2, "cache_hits": 0, "fallback_rows": 0},
+        token_estimate=TokenEstimate(
+            source="test",
+            sample_prompt_tokens=0,
+            sample_completion_tokens=0,
+            sample_cached_tokens=0,
+            sample_cache_write_tokens=0,
+            sample_latency_ms=0,
+            calls_by_model={},
+        ),
+        estimated_full_test_cost=0.01,
+        projected_prompt_tokens=0,
+        projected_completion_tokens=0,
+        estimated_runtime_seconds=0,
+    )
+
+    table = _format_strategy_table([result])
+
+    assert "| Strategy | Mode | Vision Provider | Vision Model | Adjudicator | Fresh calls |" in table
+    assert "two_pass" in table
+    assert "openrouter/adjudicator-model" in table
 
 
 def test_evaluation_report_describes_cache_only_provider_runs(tmp_path):

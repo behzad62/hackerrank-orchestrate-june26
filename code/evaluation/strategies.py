@@ -14,6 +14,9 @@ class EvalStrategy:
     name: str
     provider: str
     model: str
+    mode: str = "one_pass"
+    adjudicator_provider: str | None = None
+    adjudicator_model: str | None = None
     prompt_version: str | None = None
     reasoning_enabled: bool | None = None
     reasoning_effort: str | None = None
@@ -37,6 +40,13 @@ def _validate_name(name: str) -> str:
     return normalized
 
 
+def _validate_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in {"one_pass", "two_pass"}:
+        raise ValueError(f"Invalid strategy mode: {mode!r}")
+    return normalized
+
+
 def parse_strategy(raw: str) -> EvalStrategy:
     name, separator, remainder = raw.strip().partition("=")
     if not separator:
@@ -49,10 +59,19 @@ def parse_strategy(raw: str) -> EvalStrategy:
         if not option_separator:
             raise ValueError(f"Invalid strategy option: {option!r}")
         options[key.strip().lower().replace("-", "_")] = value.strip()
+    adjudicator_provider = None
+    adjudicator_model = None
+    if options.get("adjudicator"):
+        adjudicator = parse_provider_spec(options["adjudicator"])
+        adjudicator_provider = adjudicator.provider
+        adjudicator_model = adjudicator.model
     return EvalStrategy(
         name=_validate_name(name),
         provider=spec.provider,
         model=spec.model,
+        mode=_validate_mode(options.get("mode", "one_pass")),
+        adjudicator_provider=adjudicator_provider,
+        adjudicator_model=adjudicator_model,
         prompt_version=options.get("prompt_version"),
         reasoning_enabled=(
             _coerce_bool(options["reasoning_enabled"])

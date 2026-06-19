@@ -166,3 +166,20 @@ def test_prompt_clarifies_contradicted_vs_not_enough_information():
 
     assert "prefer claim_status=contradicted" in prompt
     assert "Use not_enough_information only when" in prompt
+
+
+def test_prompt_parts_support_internal_override_for_custom_provider_calls():
+    context = PredictionContext(
+        row_index=9,
+        row={
+            "claim_object": "car",
+            "_prompt_override_static": "STATIC PASS ONE",
+            "_prompt_override_dynamic": "DYNAMIC PASS ONE",
+        },
+    )
+
+    parts = build_prompt_parts(context)
+
+    assert parts.static_prefix == "STATIC PASS ONE"
+    assert parts.dynamic_suffix == "DYNAMIC PASS ONE"
+    assert parts.full_text == "STATIC PASS ONE\n\nDYNAMIC PASS ONE"

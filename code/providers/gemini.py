@@ -6,7 +6,13 @@ from typing import Any
 
 import requests
 
-from providers.openai_compatible import _cache_hit_ratio, _safe_token_count, extract_json_object, has_decision_payload
+from providers.openai_compatible import (
+    _cache_hit_ratio,
+    _safe_token_count,
+    extract_json_object,
+    has_decision_payload,
+    has_supported_json_payload,
+)
 from prompting import build_prompt_parts
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 
@@ -143,6 +149,121 @@ class GeminiProvider:
                 self._url(),
                 headers=self._headers(),
                 json=self._payload(context),
+                timeout=self.timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="timeout", latency_ms=duration_ms)
+        except requests.exceptions.RequestException:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="network_error", latency_ms=duration_ms)
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        request_id = response.headers.get("x-request-id", "") or response.headers.get("x-goog-request-id", "")
+        if response.status_code >= 400:
+            return self._error_result(
+                category=categorize_gemini_http_error(response.status_code, response.text),
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                request_id=request_id,
+            )
+
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        cached_tokens = 0
+        finish_reason = ""
+        try:
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("response JSON is not an object")
+            prompt_tokens, completion_tokens, total_tokens, cached_tokens = _normalize_usage(
+                data.get("usageMetadata")
+            )
+            candidates = data.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                raise ValueError("missing candidates")
+            candidate = candidates[0]
+            if not isinstance(candidate, dict):
+                raise ValueError("invalid candidate")
+            finish_reason = str(candidate.get("finishReason") or "")
+            if finish_reason == "MAX_TOKENS":
+                return self._error_result(
+                    category="response_truncated",
+                    latency_ms=duration_ms,
+                    http_status=response.status_code,
+                    finish_reason=finish_reason,
+                    request_id=request_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    cached_tokens=cached_tokens,
+                )
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                raise ValueError("missing content")
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                raise ValueError("missing parts")
+            text = "\n".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+            parsed = extract_json_object(text)
+            if not has_supported_json_payload(parsed):
+                raise ValueError("missing supported payload")
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return self._error_result(
+                category="json_parse_error",
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                finish_reason=finish_reason,
+                request_id=request_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cached_tokens=cached_tokens,
+            )
+
+        return ProviderResult(
+            raw_json=parsed,
+            metadata=ProviderMetadata(
+                provider=self.name,
+                model=self.model,
+                latency_ms=duration_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                finish_reason=finish_reason,
+                request_id=request_id,
+                http_status=response.status_code,
+                cached_tokens=cached_tokens,
+                cache_hit_ratio=_cache_hit_ratio(cached_tokens, prompt_tokens),
+                prompt_cache_retention=self.prompt_cache_retention if self.prompt_cache_enabled else "",
+                prompt_cache_key_used=self.prompt_cache_enabled,
+                cache_read_input_tokens=cached_tokens,
+            ),
+        )
+
+    def complete_json(self, prompt: str) -> ProviderResult:
+        started = time.monotonic()
+        generation_config: dict[str, Any] = {
+            "maxOutputTokens": self.max_output_tokens,
+            "responseMimeType": "application/json",
+        }
+        if self.reasoning_enabled:
+            thinking_level = "high" if self.reasoning_effort == "xhigh" else self.reasoning_effort
+            if thinking_level and thinking_level != "none":
+                generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+        try:
+            response = requests.post(
+                self._url(),
+                headers=self._headers(),
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": generation_config,
+                },
                 timeout=self.timeout_seconds,
             )
         except requests.exceptions.Timeout:
