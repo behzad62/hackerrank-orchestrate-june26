@@ -304,3 +304,122 @@ def test_run_predictions_retries_retryable_provider_errors(monkeypatch, tmp_path
     assert rows[0]["supporting_image_ids"] == "img_1"
     log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
     assert '"error_category": "server_error"' in log_text
+
+
+def test_run_predictions_does_not_cache_fallback_after_provider_error(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=True,
+        paths=paths,
+    )
+
+    class ErrorProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="openai",
+                    model="test-model",
+                    error_category="server_error",
+                ),
+            )
+
+    class HealthyProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openai", model="test-model"),
+            )
+
+    error_provider = ErrorProvider()
+    healthy_provider = HealthyProvider()
+    providers = iter([error_provider, healthy_provider])
+    monkeypatch.setattr("runner.build_provider", lambda config: next(providers))
+
+    first_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+    assert list(paths.cache_dir.glob("*.json")) == []
+    second_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert error_provider.calls == 1
+    assert first_rows[0]["claim_status"] == "not_enough_information"
+    assert healthy_provider.calls == 1
+    assert second_rows[0]["claim_status"] == "supported"
+    assert len(list(paths.cache_dir.glob("*.json"))) == 1
+
+
+def test_run_predictions_uses_cache_for_successful_provider_result(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class HealthyProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openai", model="test-model"),
+            )
+
+    provider = HealthyProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: provider)
+
+    first_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+    second_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert provider.calls == 1
+    assert first_rows[0]["claim_status"] == "supported"
+    assert second_rows[0]["claim_status"] == "supported"
+    assert len(list(paths.cache_dir.glob("*.json"))) == 1

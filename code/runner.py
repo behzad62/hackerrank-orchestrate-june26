@@ -182,6 +182,15 @@ def _metadata_from_cache(payload: dict[str, Any]) -> ProviderMetadata:
     )
 
 
+def _cache_payload_is_trustworthy(payload: dict[str, Any]) -> bool:
+    if payload.get("used_fallback", False):
+        return False
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("error_category"):
+        return False
+    return True
+
+
 def _selected_requirements(all_requirements: list[dict[str, str]], claim_object: str) -> list[dict[str, str]]:
     return [
         requirement
@@ -287,26 +296,31 @@ def run_predictions(
         )
         cached = read_cache(paths.cache_dir, cache_key)
         if cached:
-            raw_json = cached.get("raw_json")
-            if not isinstance(raw_json, dict):
-                raw_json = {"decision": {}}
-            result = ProviderResult(
-                raw_json=raw_json,
-                metadata=_metadata_from_cache(cached),
-                used_fallback=bool(cached.get("used_fallback", False)),
-            )
-            cache_hit = True
-        else:
+            if _cache_payload_is_trustworthy(cached):
+                raw_json = cached.get("raw_json")
+                if not isinstance(raw_json, dict):
+                    raw_json = {"decision": {}}
+                result = ProviderResult(
+                    raw_json=raw_json,
+                    metadata=_metadata_from_cache(cached),
+                    used_fallback=False,
+                )
+                cache_hit = True
+            else:
+                logger.write("cache_ignored_degraded_result", row_index=row_index, provider=provider_name)
+                cached = None
+        if not cached:
             result = _call_with_retries(provider, context, cfg, logger)
-            write_cache(
-                paths.cache_dir,
-                cache_key,
-                {
-                    "raw_json": result.raw_json,
-                    "metadata": result.metadata.__dict__,
-                    "used_fallback": result.used_fallback,
-                },
-            )
+            if not result.used_fallback and not result.metadata.error_category:
+                write_cache(
+                    paths.cache_dir,
+                    cache_key,
+                    {
+                        "raw_json": result.raw_json,
+                        "metadata": result.metadata.__dict__,
+                        "used_fallback": result.used_fallback,
+                    },
+                )
             cache_hit = False
 
         _write_provider_response_log(logger, context, result, cache_hit)
