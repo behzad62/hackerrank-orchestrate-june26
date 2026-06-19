@@ -56,15 +56,16 @@ def _write_report(
     test_rows: list[dict[str, str]],
     provider: str,
     model: str,
+    observed_provider: str,
     fallback_allowed: bool,
     fallback_used: bool,
+    sample_model_calls: int,
+    test_model_calls: int,
 ) -> None:
     sample_images = _count_images(sample_rows)
     test_images = _count_images(test_rows)
-    real_provider = provider != "none"
-    sample_calls = len(sample_rows) if real_provider else 0
-    test_calls = len(test_rows) if real_provider else 0
     scores = metrics.get("risk_flag_scores", {})
+    image_scores = metrics.get("supporting_image_id_scores", {})
     if provider == "none":
         fallback_note = "No VLM provider was configured, so images were not inspected and model cost is $0."
     elif fallback_used:
@@ -79,7 +80,8 @@ def _write_report(
 
 ## Strategy
 
-- Provider: `{provider}`
+- Provider configured: `{provider}`
+- Provider observed in sample run: `{observed_provider}`
 - Model: `{model or 'none'}`
 - Fallback allowed: `{fallback_allowed}`
 - Fallback actually used/no-vision: `{fallback_used}`
@@ -106,17 +108,24 @@ def _write_report(
 - Recall: {float(scores.get('recall', 0.0)):.3f}
 - F1: {float(scores.get('f1', 0.0)):.3f}
 
+### Supporting Image IDs
+
+- Set precision: {float(image_scores.get('precision', 0.0)):.3f}
+- Set recall: {float(image_scores.get('recall', 0.0)):.3f}
+- Set F1: {float(image_scores.get('f1', 0.0)):.3f}
+- Average Jaccard overlap: {float(image_scores.get('average_jaccard', 0.0)):.3f}
+
 ## Operational Analysis
 
 Sample set:
 - Rows: {len(sample_rows)}
 - Images: {sample_images}
-- Model calls: {sample_calls}
+- Model calls: {sample_model_calls}
 
 Test set:
 - Rows: {len(test_rows)}
 - Images: {test_images}
-- Expected model calls: {test_calls}
+- Expected model calls: {test_model_calls}
 
 The system uses one multimodal call per claim row when a real VLM provider is configured. Images for the same claim are submitted together so the model can compare overview and close-up evidence.
 
@@ -159,9 +168,16 @@ def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Pa
     return output_arg / "sample_predictions.csv"
 
 
-def _fallback_used_from_log(log_path: Path) -> bool:
+def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "fallback_used": False,
+        "observed_provider": "unknown",
+        "model_calls": 0,
+    }
     if not log_path.exists():
-        return False
+        return summary
+    providers: set[str] = set()
+    model_calls = 0
     fallback_used = False
     for line in log_path.read_text(encoding="utf-8").splitlines():
         try:
@@ -169,12 +185,27 @@ def _fallback_used_from_log(log_path: Path) -> bool:
         except json.JSONDecodeError:
             continue
         if record.get("event") == "run_started":
+            providers = set()
+            model_calls = 0
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
             fallback_used = True
-        if record.get("event") == "provider_response" and record.get("used_fallback") is True:
-            fallback_used = True
-    return fallback_used
+        if record.get("event") == "provider_response":
+            provider = str(record.get("provider") or "").strip().lower() or "unknown"
+            providers.add(provider)
+            if record.get("used_fallback") is True:
+                fallback_used = True
+            elif provider != "none":
+                model_calls += 1
+    observed_provider = "unknown"
+    if len(providers) == 1:
+        observed_provider = next(iter(providers))
+    elif len(providers) > 1:
+        observed_provider = "mixed:" + ";".join(sorted(providers))
+    summary["fallback_used"] = fallback_used
+    summary["observed_provider"] = observed_provider
+    summary["model_calls"] = model_calls
+    return summary
 
 
 def main() -> int:
@@ -220,6 +251,10 @@ def main() -> int:
     write_errors_csv(errors_path, errors)
     write_metrics_json(metrics_path, metrics)
     test_rows = load_claim_rows(paths.claims_csv)
+    run_summary = _latest_run_provider_summary(paths.logs_dir / "run.jsonl")
+    observed_provider = str(run_summary["observed_provider"])
+    sample_model_calls = int(run_summary["model_calls"])
+    test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} and sample_model_calls else 0
     _write_report(
         report_path,
         metrics,
@@ -227,8 +262,11 @@ def main() -> int:
         test_rows,
         cfg.provider,
         cfg.model,
+        observed_provider=observed_provider,
         fallback_allowed=cfg.allow_no_vision_fallback,
-        fallback_used=cfg.provider == "none" or _fallback_used_from_log(paths.logs_dir / "run.jsonl"),
+        fallback_used=cfg.provider == "none" or bool(run_summary["fallback_used"]),
+        sample_model_calls=sample_model_calls,
+        test_model_calls=test_model_calls,
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")

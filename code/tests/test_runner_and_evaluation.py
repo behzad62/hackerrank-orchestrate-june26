@@ -164,7 +164,12 @@ from config import AppConfig
 from runner import build_provider, run_predictions
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
-from evaluation.metrics import compare_rows, risk_flag_scores, write_errors_csv
+from evaluation.metrics import (
+    compare_rows,
+    risk_flag_scores,
+    supporting_image_id_scores,
+    write_errors_csv,
+)
 from evaluation.main import _write_report
 
 
@@ -613,6 +618,7 @@ def test_compare_rows_computes_field_accuracy_and_errors():
     assert metrics["field_accuracy"]["claim_status"] == 0.5
     assert metrics["field_accuracy"]["risk_flags"] == 0.5
     assert metrics["field_accuracy"]["supporting_image_ids"] == 1.0
+    assert metrics["supporting_image_id_scores"]["f1"] == 1.0
     assert len(errors) == 2
     assert errors[0]["row_index"] == "2"
     assert errors[0]["user_id"] == "u2"
@@ -657,6 +663,23 @@ def test_risk_flag_scores_treat_none_and_empty_as_no_flags():
     assert scores["f1"] == 1.0
 
 
+def test_risk_flag_scores_counts_unequal_inputs_as_misses():
+    scores = risk_flag_scores(expected=["damage_not_visible"], predicted=[])
+
+    assert scores["precision"] == 1.0
+    assert scores["recall"] == 0.0
+    assert scores["f1"] == 0.0
+
+
+def test_supporting_image_id_scores_include_set_overlap():
+    scores = supporting_image_id_scores(expected=["img_1;img_2"], predicted=["img_2;img_3"])
+
+    assert scores["precision"] == 0.5
+    assert scores["recall"] == 0.5
+    assert scores["f1"] == 0.5
+    assert round(scores["average_jaccard"], 3) == 0.333
+
+
 def test_write_errors_csv_outputs_expected_columns(tmp_path):
     output = tmp_path / "errors.csv"
     write_errors_csv(
@@ -699,8 +722,11 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
         test_rows=[{"image_paths": "images/test/case_001/img_1.jpg"}],
         provider="openai",
         model="vision-model",
+        observed_provider="openai",
         fallback_allowed=True,
         fallback_used=False,
+        sample_model_calls=1,
+        test_model_calls=1,
     )
 
     report = report_path.read_text(encoding="utf-8")
@@ -709,6 +735,39 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
     assert "A configured VLM provider was used for image inspection." in report
     assert "With `VLM_PROVIDER=none` or no-vision fallback, images were not inspected" not in report
     assert "Model calls: 1" in report
+
+
+def test_evaluation_report_uses_observed_provider_for_fallback_call_counts(tmp_path):
+    report_path = tmp_path / "evaluation_report.md"
+    metrics = {
+        "rows_expected": 1,
+        "rows_predicted": 1,
+        "rows_compared": 1,
+        "error_count": 0,
+        "field_accuracy": {"claim_status": 1.0},
+        "risk_flag_scores": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    }
+
+    _write_report(
+        report_path,
+        metrics,
+        sample_rows=[{"image_paths": "images/sample/case_001/img_1.jpg"}],
+        test_rows=[{"image_paths": "images/test/case_001/img_1.jpg"}],
+        provider="openai",
+        model="vision-model",
+        observed_provider="none",
+        fallback_allowed=True,
+        fallback_used=True,
+        sample_model_calls=0,
+        test_model_calls=0,
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "Provider configured: `openai`" in report
+    assert "Provider observed in sample run: `none`" in report
+    assert "Fallback actually used/no-vision: `True`" in report
+    assert "Model calls: 0" in report
+    assert "Expected model calls: 0" in report
 
 
 def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):

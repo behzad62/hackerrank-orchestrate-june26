@@ -36,9 +36,10 @@ def _flag_set(value: str) -> set[str]:
 
 def risk_flag_scores(expected: list[str], predicted: list[str]) -> dict[str, float]:
     true_positive = false_positive = false_negative = 0
-    for exp, pred in zip(expected, predicted):
-        exp_set = _flag_set(exp)
-        pred_set = _flag_set(pred)
+    total = max(len(expected), len(predicted))
+    for idx in range(total):
+        exp_set = _flag_set(expected[idx]) if idx < len(expected) else set()
+        pred_set = _flag_set(predicted[idx]) if idx < len(predicted) else set()
         true_positive += len(exp_set & pred_set)
         false_positive += len(pred_set - exp_set)
         false_negative += len(exp_set - pred_set)
@@ -55,6 +56,22 @@ def risk_flag_scores(expected: list[str], predicted: list[str]) -> dict[str, flo
     )
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def supporting_image_id_scores(expected: list[str], predicted: list[str]) -> dict[str, float]:
+    scores = risk_flag_scores(expected, predicted)
+    total = max(len(expected), len(predicted))
+    if not total:
+        average_jaccard = 1.0
+    else:
+        overlaps = []
+        for idx in range(total):
+            exp_set = _flag_set(expected[idx]) if idx < len(expected) else set()
+            pred_set = _flag_set(predicted[idx]) if idx < len(predicted) else set()
+            union = exp_set | pred_set
+            overlaps.append((len(exp_set & pred_set) / len(union)) if union else 1.0)
+        average_jaccard = sum(overlaps) / total
+    return {**scores, "average_jaccard": average_jaccard}
 
 
 def compare_rows(
@@ -116,6 +133,17 @@ def compare_rows(
             ],
             [
                 predicted[idx].get("risk_flags", "none") if idx < len(predicted) else ""
+                for idx in range(total)
+            ],
+        )
+    if "supporting_image_ids" in fields:
+        metrics["supporting_image_id_scores"] = supporting_image_id_scores(
+            [
+                expected[idx].get("supporting_image_ids", "none") if idx < len(expected) else ""
+                for idx in range(total)
+            ],
+            [
+                predicted[idx].get("supporting_image_ids", "none") if idx < len(predicted) else ""
                 for idx in range(total)
             ],
         )
