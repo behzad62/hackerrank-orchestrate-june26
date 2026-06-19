@@ -19,9 +19,11 @@ VISIBLE_DAMAGE_WORDS = (
     | TORN_WORDS
     | WATER_WORDS
     | STAIN_WORDS
-    | {"dent", "dented", "deformation", "damage", "damaged", "broken", "crack", "cracked", "missing"}
+    | {"dent", "dented", "deformation", "damage", "damaged", "broken", "crack", "cracked", "missing", "impact"}
 )
 ABSENCE_WORDS = {"no damage", "not visible", "absent", "missing evidence", "cannot see", "not shown", "no visible"}
+MISMATCH_WORDS = {"mismatch", "different part", "wrong part", "different object", "wrong object", "not the claimed", "stock photo", "watermark", "vecteezy"}
+SUPPORT_WORDS = {"clearly shows", "plainly observable", "visible", "consistent with", "matching", "supports the claim", "directly shows"}
 CONTRADICTION_EVIDENCE_FLAGS = {
     "claim_mismatch",
     "wrong_object",
@@ -175,7 +177,7 @@ def _observation_supports_contradiction(observation: dict[str, Any], issue_type:
         return True
     if any(flag in quality or flag.replace("_", " ") in quality for flag in CONTRADICTION_EVIDENCE_FLAGS):
         return True
-    if _contains_any(text, {"mismatch", "different part", "wrong part", "different object", "wrong object"}):
+    if _contains_any(text, MISMATCH_WORDS):
         return True
     if _observation_has_visible_issue(observation) and "claim_mismatch" in risk_flags:
         return True
@@ -213,7 +215,6 @@ def _repair_supporting_image_ids(
             image_id = _observation_image_id(observation)
             if image_id and _observation_has_visible_issue(observation):
                 repaired_ids.append(image_id)
-        # When observations are missing or too sparse, keep the provider-selected IDs rather than guessing.
         if not repaired_ids:
             repaired_ids = current_ids
     elif claim_status == "contradicted":
@@ -250,6 +251,35 @@ def _strong_quality_signal(flag: str, evidence_text: str) -> bool:
         return _contains_any(clean, NON_ORIGINAL_WORDS)
     signal_words = QUALITY_SIGNAL_WORDS.get(flag)
     return bool(signal_words and _contains_any(clean, signal_words))
+
+
+def _infer_issue_from_evidence(claim_object: str, object_part: str, evidence_text: str) -> str:
+    if object_part == "side_mirror" and _contains_any(evidence_text, VISIBLE_DAMAGE_WORDS | GLASS_WORDS):
+        return "broken_part"
+    if claim_object == "laptop" and object_part == "screen" and _contains_any(evidence_text, GLASS_WORDS | {"crack", "cracked", "fracture"}):
+        return "crack"
+    if claim_object == "package":
+        if _contains_any(evidence_text, TORN_WORDS):
+            return "torn_packaging"
+        if _contains_any(evidence_text, CRUSH_WORDS):
+            return "crushed_packaging"
+        if _contains_any(evidence_text, WATER_WORDS):
+            return "water_damage"
+        if _contains_any(evidence_text, STAIN_WORDS):
+            return "stain"
+        if _contains_any(evidence_text, {"missing", "absent"}):
+            return "missing_part"
+    if _contains_any(evidence_text, GLASS_WORDS):
+        return "glass_shatter" if object_part in {"windshield"} else "crack"
+    if _contains_any(evidence_text, {"crack", "cracked", "fracture"}):
+        return "crack"
+    if _contains_any(evidence_text, {"dent", "dented", "deformation", "pushed in", "caved"}):
+        return "dent"
+    if _contains_any(evidence_text, SCRATCH_WORDS):
+        return "scratch"
+    if _contains_any(evidence_text, {"heavily damaged", "severe damage", "front-end damage", "broken", "damaged car"}):
+        return "broken_part"
+    return "unknown"
 
 
 def _repair_issue_type(
@@ -337,10 +367,6 @@ def _cleanup_flags_for_status(flags: list[str], claim_status: str, issue_type: s
             output.remove(flag)
             _append_repair(repairs, "risk_flags", flag, "removed", f"weak_{flag}_signal")
 
-    if _contains_any(_strip_flag_tokens(evidence_text), NON_ORIGINAL_WORDS) and "non_original_image" not in output:
-        output.append("non_original_image")
-        _append_repair(repairs, "risk_flags", "missing", "non_original_image", "non_original_image_signal")
-
     if claim_status == "supported":
         for flag in list(CONTRADICTION_NOISE_FLAGS):
             if flag in output and not _strong_quality_signal(flag, evidence_text):
@@ -362,6 +388,16 @@ def _cleanup_flags_for_status(flags: list[str], claim_status: str, issue_type: s
     return _ordered_flags(output)
 
 
+def _has_support_signal(evidence_text: str, supporting_image_ids: str, issue_type: str) -> bool:
+    if supporting_image_ids != "none" and issue_type not in {"unknown", "none"}:
+        return True
+    return _contains_any(evidence_text, SUPPORT_WORDS) and _contains_any(evidence_text, VISIBLE_DAMAGE_WORDS)
+
+
+def _has_contradiction_signal(evidence_text: str, risk_flags: list[str]) -> bool:
+    return bool(set(risk_flags) & {"claim_mismatch", "non_original_image", "wrong_object", "wrong_object_part"}) or _contains_any(evidence_text, MISMATCH_WORDS)
+
+
 def repair_normalized_decision(
     *,
     claim_object: str,
@@ -379,29 +415,52 @@ def repair_normalized_decision(
 ) -> RepairedDecision:
     evidence_text = _flatten_text(raw_decision).lower()
 
+    flags = [flag for flag in risk_flags if flag != "none"]
+    flags = _cleanup_flags_for_status(flags, claim_status, issue_type, evidence_text, repairs)
+
+    if claim_status == "not_enough_information":
+        contradiction_signal = _has_contradiction_signal(evidence_text, flags)
+        support_signal = _has_support_signal(evidence_text, supporting_image_ids, issue_type)
+        if contradiction_signal:
+            _append_repair(repairs, "claim_status", claim_status, "contradicted", "nei_with_mismatch_or_authenticity_evidence")
+            claim_status = "contradicted"
+            evidence_standard_met = True
+            valid_image = True
+            if issue_type == "unknown":
+                inferred = _infer_issue_from_evidence(claim_object, object_part, evidence_text)
+                if inferred != "unknown":
+                    _append_repair(repairs, "issue_type", issue_type, inferred, "contradiction_visible_issue_inference")
+                    issue_type = inferred
+        elif support_signal:
+            _append_repair(repairs, "claim_status", claim_status, "supported", "nei_with_direct_supporting_evidence")
+            claim_status = "supported"
+            evidence_standard_met = True
+            valid_image = True
+
     original_issue_type = issue_type
     issue_type = _repair_issue_type(claim_object, issue_type, object_part, evidence_text, claim_status)
     _append_repair(repairs, "issue_type", original_issue_type, issue_type, "contest_issue_type_calibration")
 
-    flags = [flag for flag in risk_flags if flag != "none"]
     flags = _cleanup_flags_for_status(flags, claim_status, issue_type, evidence_text, repairs)
 
-    visible_mismatch = "claim_mismatch" in flags and valid_image and _visible_alternate_damage(raw_decision, evidence_text)
+    visible_mismatch = "claim_mismatch" in flags and _visible_alternate_damage(raw_decision, evidence_text)
     if visible_mismatch and claim_status == "not_enough_information" and "wrong_object" not in flags:
         _append_repair(repairs, "claim_status", claim_status, "contradicted", "visible_claim_mismatch")
         claim_status = "contradicted"
         evidence_standard_met = True
+        valid_image = True
 
-    if claim_status == "contradicted" and any(flag in flags for flag in CONTRADICTION_EVIDENCE_FLAGS):
-        if not evidence_standard_met:
-            _append_repair(
-                repairs,
-                "evidence_standard_met",
-                evidence_standard_met,
-                True,
-                "contradiction_supported_by_image",
-            )
+    if claim_status == "supported" and not evidence_standard_met:
+        _append_repair(repairs, "evidence_standard_met", evidence_standard_met, True, "supported_claim_implies_evidence")
         evidence_standard_met = True
+    if claim_status == "contradicted" and (any(flag in flags for flag in CONTRADICTION_EVIDENCE_FLAGS) or _has_contradiction_signal(evidence_text, flags)):
+        if not evidence_standard_met:
+            _append_repair(repairs, "evidence_standard_met", evidence_standard_met, True, "contradiction_supported_by_image")
+        evidence_standard_met = True
+
+    if evidence_standard_met and claim_status in {"supported", "contradicted"} and not valid_image:
+        _append_repair(repairs, "valid_image", valid_image, True, "decision_supported_by_visual_evidence")
+        valid_image = True
 
     if issue_type == "none":
         severity_target = "none"
