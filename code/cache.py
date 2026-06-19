@@ -3,10 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 VALID_CACHE_KEY = re.compile(r"^[A-Fa-f0-9]{64}$")
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for_key(key: str) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        if key not in _CACHE_LOCKS:
+            _CACHE_LOCKS[key] = threading.Lock()
+        return _CACHE_LOCKS[key]
 
 
 def _stable_json(value: Any) -> str:
@@ -46,13 +57,26 @@ def read_cache(cache_dir: Path, key: str) -> dict[str, Any] | None:
     path = _cache_path(cache_dir, key)
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
 
 
 def write_cache(cache_dir: Path, key: str, payload: dict[str, Any]) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _cache_path(cache_dir, key)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
+    tmp_path = path.with_name(f"{path.name}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    with _lock_for_key(str(path.resolve())):
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        for attempt in range(5):
+            try:
+                tmp_path.replace(path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))

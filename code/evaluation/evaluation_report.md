@@ -2,9 +2,9 @@
 
 ## Strategy
 
-- Provider configured: `gemini`
+- Provider configured: `openrouter`
 - Provider observed in sample run: `mixed:gemini;openrouter`
-- Model: `gemini-3.5-flash`
+- Model: `minimax/minimax-m3`
 - Fallback allowed: `False`
 - Fallback actually used/no-vision: `False`
 - Fallback honesty: A configured VLM provider was used for image inspection.
@@ -60,6 +60,9 @@ Sample set:
 - Primary provider calls: 18
 - Backup provider calls: 18
 - Fallback rows: 0
+- Cache hits: 0
+- Configured max concurrency: 1
+- Rate-limit waits: 0
 
 Backup reasons:
 - rate_limited: 18
@@ -97,6 +100,7 @@ Estimated full-test token usage and cost:
 
 Latency/runtime estimate:
 - Observed total provider latency: 353.17s
+- Observed total run runtime: 0.00s
 - Observed average latency per fresh call: 19.62s
 - Estimated full-test provider runtime at current sequential settings: 1550.01s
 

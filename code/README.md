@@ -30,6 +30,9 @@ VLM_MAX_RETRIES=2
 VLM_RETRY_MAX_SLEEP_SECONDS=8
 VLM_TIMEOUT_SECONDS=90
 VLM_MAX_OUTPUT_TOKENS=1800
+VLM_MAX_CONCURRENCY=1
+VLM_REQUESTS_PER_MINUTE=0
+VLM_BACKUP_MAX_CONCURRENCY=1
 VLM_CACHE_DIR=.cache/vlm
 PROMPT_CACHE_ENABLED=true
 PROMPT_CACHE_RETENTION=24h
@@ -48,6 +51,8 @@ VLM_MODEL_PRICES=openrouter:qwen/qwen3.7-plus=0.32,1.28;gemini:gemini-3.5-flash=
 `VLM_REASONING_ENABLED` enables provider reasoning controls when the selected model supports them. `VLM_REASONING_EFFORT` accepts OpenRouter-style levels such as `minimal`, `low`, `medium`, `high`, `xhigh`, and `none`; native Gemini maps this to `thinkingLevel`. `VLM_REASONING_EXCLUDE=true` asks compatible providers not to return reasoning text in the response, which keeps JSON extraction cleaner.
 
 `VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. Unlisted provider/model pairs are treated as `$0` in evaluation cost estimates until explicitly configured.
+
+`VLM_MAX_CONCURRENCY` enables bounded per-claim parallelism. The default is `1` for sequential behavior. `VLM_REQUESTS_PER_MINUTE` adds a simple shared request-start limiter when greater than zero, and `VLM_BACKUP_MAX_CONCURRENCY` prevents backup-provider stampedes when the primary provider is broadly failing.
 
 ## Run Final Predictions
 
