@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,12 +9,24 @@ from typing import Any
 SECRET_MARKERS = ("api_key", "authorization", "token", "secret", "cookie")
 IMAGE_PAYLOAD_MARKERS = ("data_base64", "base64", "image_payload", "image_bytes", "raw_image")
 MAX_STRING_LENGTH = 240
+IMAGE_DATA_URI_PATTERN = re.compile(r"data:image/[a-z0-9.+-]+;base64,", re.IGNORECASE)
+LIKELY_BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+def _looks_like_base64_payload(value: str) -> bool:
+    if len(value) < MAX_STRING_LENGTH:
+        return False
+    if not LIKELY_BASE64_PATTERN.fullmatch(value):
+        return False
+    return any(char.isupper() or char.isdigit() or char in "+/=" for char in value)
 
 
 def redact_value(value: Any) -> Any:
     if isinstance(value, str):
         lowered = value.lower()
         if value.startswith(("sk-", "sk-ant-")) or "bearer " in lowered:
+            return "[REDACTED]"
+        if IMAGE_DATA_URI_PATTERN.search(value) or _looks_like_base64_payload(value):
             return "[REDACTED]"
         if len(value) > MAX_STRING_LENGTH:
             return value[:MAX_STRING_LENGTH] + "..."
@@ -42,11 +55,11 @@ class JsonlLogger:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def write(self, event: str, **fields: Any) -> None:
+    def write(self, event_name: str, **fields: Any) -> None:
         record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": event,
             **fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event_name,
         }
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(_safe_record(record), ensure_ascii=False) + "\n")

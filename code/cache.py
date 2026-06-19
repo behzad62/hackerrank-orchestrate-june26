@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+VALID_CACHE_KEY = re.compile(r"^[A-Fa-f0-9]{64}$")
 
 
 def _stable_json(value: Any) -> str:
@@ -34,6 +37,8 @@ def build_cache_key(
 
 
 def _cache_path(cache_dir: Path, key: str) -> Path:
+    if not VALID_CACHE_KEY.fullmatch(key):
+        raise ValueError("Cache key must be exactly 64 hexadecimal characters.")
     return cache_dir / f"{key}.json"
 
 
