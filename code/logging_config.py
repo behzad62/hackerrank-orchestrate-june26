@@ -15,7 +15,15 @@ LIKELY_BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/_-]+$")
 
 
 def _looks_like_base64_payload(value: str) -> bool:
-    normalized = re.sub(r"\s+", "", value)
+    if re.search(r"\s", value):
+        if not re.search(r"[\r\n]", value):
+            return False
+        chunks = [chunk.strip() for chunk in value.splitlines() if chunk.strip()]
+        if not chunks or any(not LIKELY_BASE64_PATTERN.fullmatch(chunk.replace("=", "")) for chunk in chunks):
+            return False
+        normalized = "".join(chunks)
+    else:
+        normalized = value
     if len(normalized) < MAX_STRING_LENGTH:
         return False
     return bool(LIKELY_BASE64_PATTERN.fullmatch(normalized.replace("=", "")))

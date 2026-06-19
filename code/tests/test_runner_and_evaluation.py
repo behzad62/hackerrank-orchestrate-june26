@@ -15,6 +15,8 @@ def test_redact_value_hides_obvious_secrets_and_truncates_long_strings():
     assert redact_value("debug: authorization failed for sk-ant-abc123 token") == "[REDACTED]"
     long_prose = ("This is ordinary prose, not a base64 payload. " * 8).strip()
     assert redact_value(long_prose) == long_prose[:240] + "..."
+    prose_with_spaces = "ordinary prose with spaces " * 20
+    assert redact_value(prose_with_spaces) == prose_with_spaces[:240] + "..."
 
 
 def test_redact_value_hides_generic_image_data_and_base64_payloads():
