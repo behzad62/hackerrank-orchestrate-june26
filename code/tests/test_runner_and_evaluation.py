@@ -165,6 +165,7 @@ from runner import build_provider, run_predictions
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
 from evaluation.metrics import compare_rows, risk_flag_scores, write_errors_csv
+from evaluation.main import _write_report
 
 
 def write_task7_minimal_dataset(root, user_claim="screen cracked"):
@@ -618,6 +619,25 @@ def test_compare_rows_computes_field_accuracy_and_errors():
     assert {error["field"] for error in errors} == {"claim_status", "risk_flags"}
 
 
+def test_compare_rows_treats_missing_predictions_as_errors():
+    expected = [
+        {"user_id": "u1", "claim_status": "supported", "risk_flags": "none"},
+        {"user_id": "u2", "claim_status": "contradicted", "risk_flags": "damage_not_visible"},
+    ]
+    predicted = [
+        {"user_id": "u1", "claim_status": "supported", "risk_flags": "none"},
+    ]
+
+    metrics, errors = compare_rows(expected, predicted, fields=["claim_status", "risk_flags"])
+
+    assert metrics["rows_compared"] == 2
+    assert metrics["field_accuracy"]["claim_status"] == 0.5
+    assert metrics["field_accuracy"]["risk_flags"] == 0.5
+    assert metrics["error_count"] == 2
+    assert {error["field"] for error in errors} == {"claim_status", "risk_flags"}
+    assert all(error["predicted"] == "[missing_row]" for error in errors)
+
+
 def test_risk_flag_scores_are_set_based_precision_recall_f1():
     scores = risk_flag_scores(
         expected=["damage_not_visible;manual_review_required"],
@@ -661,6 +681,36 @@ def test_write_errors_csv_outputs_expected_columns(tmp_path):
     assert rows[0]["predicted"] == "contradicted"
 
 
+def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
+    report_path = tmp_path / "evaluation_report.md"
+    metrics = {
+        "rows_expected": 1,
+        "rows_predicted": 1,
+        "rows_compared": 1,
+        "error_count": 0,
+        "field_accuracy": {"claim_status": 1.0},
+        "risk_flag_scores": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    }
+
+    _write_report(
+        report_path,
+        metrics,
+        sample_rows=[{"image_paths": "images/sample/case_001/img_1.jpg"}],
+        test_rows=[{"image_paths": "images/test/case_001/img_1.jpg"}],
+        provider="openai",
+        model="vision-model",
+        fallback_allowed=True,
+        fallback_used=False,
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "Fallback allowed: `True`" in report
+    assert "Fallback actually used/no-vision: `False`" in report
+    assert "A configured VLM provider was used for image inspection." in report
+    assert "With `VLM_PROVIDER=none` or no-vision fallback, images were not inspected" not in report
+    assert "Model calls: 1" in report
+
+
 def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):
     write_task7_minimal_dataset(tmp_path)
     env = {
@@ -686,6 +736,8 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
             str(tmp_path / "dataset" / "images"),
             "--output",
             str(tmp_path / "evaluation"),
+            "--log",
+            str(tmp_path / "logs"),
             "--provider",
             "none",
             "--fallback",

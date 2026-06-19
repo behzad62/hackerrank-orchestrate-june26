@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -55,20 +56,24 @@ def _write_report(
     test_rows: list[dict[str, str]],
     provider: str,
     model: str,
+    fallback_allowed: bool,
     fallback_used: bool,
 ) -> None:
     sample_images = _count_images(sample_rows)
     test_images = _count_images(test_rows)
-    real_provider = provider != "none" and not fallback_used
+    real_provider = provider != "none"
     sample_calls = len(sample_rows) if real_provider else 0
     test_calls = len(test_rows) if real_provider else 0
     scores = metrics.get("risk_flag_scores", {})
-    fallback_note = (
-        "With `VLM_PROVIDER=none` or no-vision fallback, images were not inspected "
-        "and model cost is $0."
-        if fallback_used or provider == "none"
-        else "A configured VLM provider was used for image inspection."
-    )
+    if provider == "none":
+        fallback_note = "No VLM provider was configured, so images were not inspected and model cost is $0."
+    elif fallback_used:
+        fallback_note = (
+            "A VLM provider was configured, but no-vision fallback was observed for at least one row. "
+            "Successful provider rows may have inspected images; fallback rows did not."
+        )
+    else:
+        fallback_note = "A configured VLM provider was used for image inspection."
 
     report = f"""# Evaluation Report
 
@@ -76,7 +81,8 @@ def _write_report(
 
 - Provider: `{provider}`
 - Model: `{model or 'none'}`
-- Fallback used or available in this run: `{fallback_used}`
+- Fallback allowed: `{fallback_allowed}`
+- Fallback actually used/no-vision: `{fallback_used}`
 - Fallback honesty: {fallback_note}
 
 ## Metrics
@@ -117,7 +123,8 @@ The system uses one multimodal call per claim row when a real VLM provider is co
 Pricing assumptions:
 - Provider pricing varies by selected model.
 - Use provider token accounting from logs/provider metadata when available.
-- With `VLM_PROVIDER=none` or no-vision fallback, images were not inspected and model cost is $0.
+- With `VLM_PROVIDER=none`, images were not inspected and model cost is $0.
+- If fallback is observed during a real-provider run, fallback rows did not receive visual inspection; provider rows may still have token costs.
 
 Runtime and rate limits:
 - Calls are sequential by default.
@@ -150,6 +157,24 @@ def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Pa
     if output_arg.suffix:
         return output_arg
     return output_arg / "sample_predictions.csv"
+
+
+def _fallback_used_from_log(log_path: Path) -> bool:
+    if not log_path.exists():
+        return False
+    fallback_used = False
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "run_started":
+            fallback_used = False
+        if record.get("event") == "provider_fallback_used":
+            fallback_used = True
+        if record.get("event") == "provider_response" and record.get("used_fallback") is True:
+            fallback_used = True
+    return fallback_used
 
 
 def main() -> int:
@@ -202,7 +227,8 @@ def main() -> int:
         test_rows,
         cfg.provider,
         cfg.model,
-        cfg.provider == "none" or cfg.allow_no_vision_fallback,
+        fallback_allowed=cfg.allow_no_vision_fallback,
+        fallback_used=cfg.provider == "none" or _fallback_used_from_log(paths.logs_dir / "run.jsonl"),
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")

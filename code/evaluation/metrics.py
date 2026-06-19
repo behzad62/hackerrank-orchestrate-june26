@@ -62,15 +62,19 @@ def compare_rows(
     predicted: list[dict[str, str]],
     fields: list[str],
 ) -> tuple[dict, list[dict[str, str]]]:
-    total = min(len(expected), len(predicted))
+    total = max(len(expected), len(predicted))
     correct = {field: 0 for field in fields}
     errors: list[dict[str, str]] = []
 
     for idx in range(total):
-        exp = expected[idx]
-        pred = predicted[idx]
+        exp = expected[idx] if idx < len(expected) else {}
+        pred = predicted[idx] if idx < len(predicted) else {}
+        missing_expected = idx >= len(expected)
+        missing_predicted = idx >= len(predicted)
         for field in fields:
-            if exp.get(field, "") == pred.get(field, ""):
+            expected_value = "[missing_row]" if missing_expected else exp.get(field, "")
+            predicted_value = "[missing_row]" if missing_predicted else pred.get(field, "")
+            if not missing_expected and not missing_predicted and expected_value == predicted_value:
                 correct[field] += 1
                 continue
             errors.append(
@@ -81,8 +85,8 @@ def compare_rows(
                     "claim_object": exp.get("claim_object", pred.get("claim_object", "")),
                     "user_claim": exp.get("user_claim", pred.get("user_claim", "")),
                     "field": field,
-                    "expected": exp.get(field, ""),
-                    "predicted": pred.get(field, ""),
+                    "expected": expected_value,
+                    "predicted": predicted_value,
                     "claim_status_expected": exp.get("claim_status", ""),
                     "claim_status_predicted": pred.get("claim_status", ""),
                     "issue_type_expected": exp.get("issue_type", ""),
@@ -106,8 +110,14 @@ def compare_rows(
     }
     if "risk_flags" in fields:
         metrics["risk_flag_scores"] = risk_flag_scores(
-            [row.get("risk_flags", "none") for row in expected[:total]],
-            [row.get("risk_flags", "none") for row in predicted[:total]],
+            [
+                expected[idx].get("risk_flags", "none") if idx < len(expected) else ""
+                for idx in range(total)
+            ],
+            [
+                predicted[idx].get("risk_flags", "none") if idx < len(predicted) else ""
+                for idx in range(total)
+            ],
         )
     return metrics, errors
 
