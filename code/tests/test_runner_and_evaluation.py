@@ -744,6 +744,8 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
     assert "Observed output tokens: 200" in report
     assert "Estimated full-test cost: $0.0020" in report
     assert "Observed average latency per fresh call: 2.50s" in report
+    assert "RPM consideration" in report
+    assert "TPM consideration" in report
 
 
 def test_evaluation_report_uses_observed_provider_for_fallback_call_counts(tmp_path):

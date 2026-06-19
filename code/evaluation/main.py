@@ -176,6 +176,8 @@ Latency/runtime estimate:
 
 Runtime and rate limits:
 - Calls are sequential by default.
+- RPM consideration: sequential execution targets at most one in-flight provider request, so effective RPM is bounded by provider latency and retry backoff rather than local parallelism.
+- TPM consideration: projected full-test token volume is approximately {projected_prompt_tokens + projected_completion_tokens} total tokens; configure provider TPM limits above this divided by the intended runtime window.
 - Retry policy uses bounded retries for rate limits, server errors, timeouts, truncated responses, and JSON parse errors.
 - Cache keys include provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
 
