@@ -1178,6 +1178,7 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
         sample_latency_ms=2500,
         input_price_per_million=1.0,
         output_price_per_million=4.0,
+        max_concurrency=3,
     )
 
     report = report_path.read_text(encoding="utf-8")
@@ -1190,6 +1191,7 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
     assert "Observed output tokens: 200" in report
     assert "Estimated full-test cost: $0.0020" in report
     assert "Observed average latency per fresh call: 2.50s" in report
+    assert "Calls use bounded parallel execution with up to 3 in-flight provider requests." in report
     assert "RPM consideration" in report
     assert "TPM consideration" in report
 
@@ -1411,7 +1413,7 @@ def test_evaluation_report_estimates_test_calls_after_cache_only_sample(tmp_path
     assert "Expected model calls: 2" in report
     assert "Projected input tokens: unavailable" in report
     assert "Estimated full-test cost: unavailable" in report
-    assert "Estimated full-test provider runtime at current sequential settings: unavailable" in report
+    assert "Estimated full-test summed provider latency at current settings: unavailable" in report
     assert "Estimated full-test cost: $0.0000" not in report
 
 

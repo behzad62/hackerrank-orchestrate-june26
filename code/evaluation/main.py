@@ -130,6 +130,18 @@ def _write_report(
         if estimates_available
         else "unavailable (sample run had no fresh latency baseline)"
     )
+    concurrency_text = (
+        "Calls use bounded parallel execution with up to "
+        f"{max_concurrency} in-flight provider requests."
+        if max_concurrency > 1
+        else "Calls run sequentially with one in-flight provider request."
+    )
+    rpm_text = (
+        "RPM consideration: local parallelism can increase burst pressure; "
+        "the configured RPM limiter, retry backoff, and provider latency bound request rate."
+        if max_concurrency > 1
+        else "RPM consideration: sequential execution targets at most one in-flight provider request, so effective RPM is bounded by provider latency and retry backoff rather than local parallelism."
+    )
     if estimates_available:
         tpm_consideration = (
             "projected full-test token volume is approximately "
@@ -249,11 +261,11 @@ Latency/runtime estimate:
 - Observed total provider latency: {observed_latency_text}
 - Observed total run runtime: {run_total_duration_ms / 1000:.2f}s
 - Observed average latency per fresh call: {avg_latency_text}
-- Estimated full-test provider runtime at current sequential settings: {estimated_runtime_text}
+- Estimated full-test summed provider latency at current settings: {estimated_runtime_text}
 
 Runtime and rate limits:
-- Calls are sequential by default.
-- RPM consideration: sequential execution targets at most one in-flight provider request, so effective RPM is bounded by provider latency and retry backoff rather than local parallelism.
+- {concurrency_text}
+- {rpm_text}
 - TPM consideration: {tpm_consideration}
 - Retry policy uses bounded retries for rate limits, server errors, timeouts, truncated responses, and JSON parse errors.
 - Cache keys include provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
@@ -511,8 +523,7 @@ def main() -> int:
     if observed_provider in {"none", "unknown"}:
         test_model_calls = 0
     else:
-        row_scale = (len(test_rows) / len(expected)) if expected else 0.0
-        test_model_calls = int(round(sample_model_calls * row_scale))
+        test_model_calls = len(test_rows)
     input_price_per_million = 0.0
     output_price_per_million = 0.0
     model_prices = parse_model_prices(os.environ.get("VLM_MODEL_PRICES", ""))
