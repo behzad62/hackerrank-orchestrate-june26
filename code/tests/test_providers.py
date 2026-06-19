@@ -106,18 +106,22 @@ def test_openai_compatible_packages_image_url(monkeypatch):
     )
     result = provider.review_claim(sample_context())
 
-    content = captured["json"]["messages"][0]["content"]
+    messages = captured["json"]["messages"]
+    system_content = messages[0]["content"]
+    user_content = messages[1]["content"]
     assert captured["url"] == "https://api.openai.com/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
     assert captured["json"]["model"] == "model"
     assert captured["json"]["temperature"] == 0.0
     assert captured["json"]["response_format"] == {"type": "json_object"}
-    assert any(part.get("type") == "text" and "front bumper scratch" in part.get("text", "") for part in content)
+    assert messages[0]["role"] == "system"
+    assert "front bumper scratch" not in system_content[0]["text"]
+    assert any(part.get("type") == "text" and "front bumper scratch" in part.get("text", "") for part in user_content)
     assert any(
         part.get("type") == "image_url"
         and part["image_url"]["url"] == "data:image/jpeg;base64,abcd"
         and part["image_url"]["detail"] == "high"
-        for part in content
+        for part in user_content
     )
     assert result.raw_json["decision"]["claim_status"] == "supported"
     assert result.metadata.total_tokens == 15
@@ -184,9 +188,75 @@ def test_openrouter_headers_are_included(monkeypatch):
     provider.review_claim(sample_context())
 
     assert captured["headers"]["HTTP-Referer"] == "https://localhost/hackerrank-orchestrate"
-    assert captured["headers"]["X-Title"] == "HackerRank Orchestrate Claim Verification"
-    assert captured["json"]["max_tokens"] == 1800
-    assert "max_completion_tokens" not in captured["json"]
+    assert captured["headers"]["X-OpenRouter-Title"] == "HackerRank Orchestrate Claim Verification"
+    assert captured["json"]["max_completion_tokens"] == 1800
+    assert "max_tokens" not in captured["json"]
+
+
+def test_openrouter_uses_system_cache_breakpoint_and_dynamic_user_content(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                    "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20},
+                },
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openrouter",
+        api_key="sk-test",
+        model="qwen/qwen3.7-plus",
+        base_url="https://openrouter.ai/api/v1",
+        prompt_cache_enabled=True,
+    )
+    result = provider.review_claim(sample_context())
+
+    messages = captured["json"]["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"][0]["type"] == "text"
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "front bumper scratch" not in messages[0]["content"][0]["text"]
+    assert messages[1]["role"] == "user"
+    assert any(part.get("type") == "text" and "front bumper scratch" in part.get("text", "") for part in messages[1]["content"])
+    assert captured["json"]["session_id"] == "hackerrank-orchestrate-claim-review-v1"
+    assert result.metadata.cached_tokens == 80
+    assert result.metadata.cache_creation_input_tokens == 20
+    assert result.metadata.cache_read_input_tokens == 80
+
+
+def test_openrouter_omits_cache_controls_when_prompt_cache_disabled(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openrouter",
+        api_key="sk-test",
+        model="qwen/qwen3.7-plus",
+        base_url="https://openrouter.ai/api/v1",
+        prompt_cache_enabled=False,
+    )
+    provider.review_claim(sample_context())
+
+    assert "cache_control" not in captured["json"]["messages"][0]["content"][0]
+    assert "session_id" not in captured["json"]
 
 
 @pytest.mark.parametrize("model", ["o3-mini", "gpt-5"])

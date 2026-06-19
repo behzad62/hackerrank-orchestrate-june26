@@ -64,6 +64,8 @@ def _write_report(
     test_model_calls: int,
     sample_prompt_tokens: int = 0,
     sample_completion_tokens: int = 0,
+    sample_cached_tokens: int = 0,
+    sample_cache_write_tokens: int = 0,
     sample_latency_ms: int = 0,
     input_price_per_million: float = 0.0,
     output_price_per_million: float = 0.0,
@@ -74,6 +76,7 @@ def _write_report(
     image_scores = metrics.get("supporting_image_id_scores", {})
     avg_prompt_tokens = sample_prompt_tokens / sample_model_calls if sample_model_calls else 0.0
     avg_completion_tokens = sample_completion_tokens / sample_model_calls if sample_model_calls else 0.0
+    cache_hit_ratio = sample_cached_tokens / sample_prompt_tokens if sample_prompt_tokens else 0.0
     projected_prompt_tokens = int(round(avg_prompt_tokens * test_model_calls))
     projected_completion_tokens = int(round(avg_completion_tokens * test_model_calls))
     estimated_cost = (
@@ -188,6 +191,9 @@ Pricing assumptions:
 Observed token usage:
 - Observed prompt tokens: {sample_prompt_tokens}
 - Observed output tokens: {sample_completion_tokens}
+- Observed prompt cache write tokens: {sample_cache_write_tokens}
+- Observed prompt cache read tokens: {sample_cached_tokens}
+- Observed prompt cache hit ratio: {cache_hit_ratio:.3f}
 - Observed average prompt tokens per fresh call: {avg_prompt_tokens:.1f}
 - Observed average output tokens per fresh call: {avg_completion_tokens:.1f}
 
@@ -243,6 +249,8 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "model_calls": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
         "latency_ms": 0,
     }
     if not log_path.exists():
@@ -260,6 +268,8 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             model_calls = 0
             summary["prompt_tokens"] = 0
             summary["completion_tokens"] = 0
+            summary["cached_tokens"] = 0
+            summary["cache_write_tokens"] = 0
             summary["latency_ms"] = 0
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
@@ -278,6 +288,8 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
                 model_calls += 1
                 summary["prompt_tokens"] = int(summary["prompt_tokens"]) + int(record.get("prompt_tokens") or 0)
                 summary["completion_tokens"] = int(summary["completion_tokens"]) + int(record.get("completion_tokens") or 0)
+                summary["cached_tokens"] = int(summary["cached_tokens"]) + int(record.get("cached_tokens") or 0)
+                summary["cache_write_tokens"] = int(summary["cache_write_tokens"]) + int(record.get("cache_creation_input_tokens") or 0)
                 summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
     observed_provider = "unknown"
     if len(providers) == 1:
@@ -355,6 +367,8 @@ def main() -> int:
         test_model_calls=test_model_calls,
         sample_prompt_tokens=int(run_summary["prompt_tokens"]),
         sample_completion_tokens=int(run_summary["completion_tokens"]),
+        sample_cached_tokens=int(run_summary["cached_tokens"]),
+        sample_cache_write_tokens=int(run_summary["cache_write_tokens"]),
         sample_latency_ms=int(run_summary["latency_ms"]),
         input_price_per_million=input_price_per_million,
         output_price_per_million=output_price_per_million,

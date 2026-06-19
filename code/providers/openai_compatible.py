@@ -74,7 +74,7 @@ def _cache_hit_ratio(cached_tokens: int, prompt_tokens: int) -> float:
     return round(cached_tokens / prompt_tokens, 4)
 
 
-def _normalize_openai_usage(usage: Any) -> tuple[int, int, int, int]:
+def _normalize_openai_usage(usage: Any) -> tuple[int, int, int, int, int]:
     if not isinstance(usage, dict):
         usage = {}
     prompt_tokens_details = usage.get("prompt_tokens_details")
@@ -85,6 +85,7 @@ def _normalize_openai_usage(usage: Any) -> tuple[int, int, int, int]:
         _safe_token_count(usage.get("completion_tokens")),
         _safe_token_count(usage.get("total_tokens")),
         _safe_token_count(prompt_tokens_details.get("cached_tokens")),
+        _safe_token_count(prompt_tokens_details.get("cache_write_tokens")),
     )
 
 
@@ -122,15 +123,12 @@ class OpenAICompatibleProvider:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         if self.name == "openrouter":
             headers["HTTP-Referer"] = "https://localhost/hackerrank-orchestrate"
-            headers["X-Title"] = "HackerRank Orchestrate Claim Verification"
+            headers["X-OpenRouter-Title"] = "HackerRank Orchestrate Claim Verification"
         return headers
 
-    def _content(self, context: PredictionContext) -> list[dict[str, Any]]:
+    def _dynamic_content(self, context: PredictionContext) -> list[dict[str, Any]]:
         prompt_parts = build_prompt_parts(context)
-        content: list[dict[str, Any]] = [
-            {"type": "text", "text": prompt_parts.static_prefix},
-            {"type": "text", "text": prompt_parts.dynamic_suffix},
-        ]
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt_parts.dynamic_suffix}]
         for image in context.prepared_images:
             if not image.readable or not image.data_base64:
                 continue
@@ -145,6 +143,16 @@ class OpenAICompatibleProvider:
             )
         return content
 
+    def _messages(self, context: PredictionContext) -> list[dict[str, Any]]:
+        prompt_parts = build_prompt_parts(context)
+        static_block: dict[str, Any] = {"type": "text", "text": prompt_parts.static_prefix}
+        if self.name == "openrouter" and self.prompt_cache_enabled:
+            static_block["cache_control"] = {"type": "ephemeral"}
+        return [
+            {"role": "system", "content": [static_block]},
+            {"role": "user", "content": self._dynamic_content(context)},
+        ]
+
     def _error_result(
         self,
         *,
@@ -157,6 +165,7 @@ class OpenAICompatibleProvider:
         completion_tokens: int = 0,
         total_tokens: int = 0,
         cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> ProviderResult:
         return ProviderResult(
             raw_json={"decision": {}},
@@ -175,6 +184,8 @@ class OpenAICompatibleProvider:
                 cache_hit_ratio=_cache_hit_ratio(cached_tokens, prompt_tokens),
                 prompt_cache_retention=self.prompt_cache_retention if self.prompt_cache_enabled else "",
                 prompt_cache_key_used=self.prompt_cache_enabled,
+                cache_creation_input_tokens=cache_write_tokens,
+                cache_read_input_tokens=cached_tokens,
             ),
         )
 
@@ -189,6 +200,7 @@ class OpenAICompatibleProvider:
         completion_tokens: int,
         total_tokens: int,
         cached_tokens: int,
+        cache_write_tokens: int,
     ) -> ProviderMetadata:
         finish_reason = str(choice.get("finish_reason") or "")
         return ProviderMetadata(
@@ -206,6 +218,8 @@ class OpenAICompatibleProvider:
             cache_hit_ratio=_cache_hit_ratio(cached_tokens, prompt_tokens),
             prompt_cache_retention=self.prompt_cache_retention if self.prompt_cache_enabled else "",
             prompt_cache_key_used=self.prompt_cache_enabled,
+            cache_creation_input_tokens=cache_write_tokens,
+            cache_read_input_tokens=cached_tokens,
         )
 
     def review_claim(self, context: PredictionContext) -> ProviderResult:
@@ -214,14 +228,16 @@ class OpenAICompatibleProvider:
             "model": self.model,
             "temperature": self.temperature,
             "response_format": {"type": "json_object"},
-            "messages": [{"role": "user", "content": self._content(context)}],
+            "messages": self._messages(context),
         }
         token_limit_key = (
             "max_completion_tokens"
-            if _uses_openai_reasoning_token_limit(self.name, self.model)
+            if self.name == "openrouter" or _uses_openai_reasoning_token_limit(self.name, self.model)
             else "max_tokens"
         )
         payload[token_limit_key] = self.max_output_tokens
+        if self.name == "openrouter" and self.prompt_cache_enabled:
+            payload["session_id"] = "hackerrank-orchestrate-claim-review-v1"
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
@@ -249,12 +265,19 @@ class OpenAICompatibleProvider:
         completion_tokens = 0
         total_tokens = 0
         cached_tokens = 0
+        cache_write_tokens = 0
         finish_reason = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
-            prompt_tokens, completion_tokens, total_tokens, cached_tokens = _normalize_openai_usage(data.get("usage"))
+            (
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cached_tokens,
+                cache_write_tokens,
+            ) = _normalize_openai_usage(data.get("usage"))
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices:
                 raise ValueError("missing choices")
@@ -273,6 +296,7 @@ class OpenAICompatibleProvider:
                     completion_tokens=completion_tokens,
                     total_tokens=total_tokens,
                     cached_tokens=cached_tokens,
+                    cache_write_tokens=cache_write_tokens,
                 )
             message = choice.get("message")
             if not isinstance(message, dict) or not isinstance(message.get("content"), str):
@@ -289,6 +313,7 @@ class OpenAICompatibleProvider:
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
                 cached_tokens=cached_tokens,
+                cache_write_tokens=cache_write_tokens,
             )
 
         return ProviderResult(
@@ -302,5 +327,6 @@ class OpenAICompatibleProvider:
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
                 cached_tokens=cached_tokens,
+                cache_write_tokens=cache_write_tokens,
             ),
         )

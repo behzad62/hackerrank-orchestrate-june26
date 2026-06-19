@@ -40,7 +40,7 @@ class AppConfig:
     max_output_tokens: int = 1800
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
-    prompt_version: str = "claim-review-v1"
+    prompt_version: str = "claim-review-v2-openrouter-cache"
     paths: AppPaths | None = None
 
     @classmethod
