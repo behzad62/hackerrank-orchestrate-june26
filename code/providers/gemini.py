@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from providers.openai_compatible import _cache_hit_ratio, _safe_token_count, extract_json_object
+from providers.openai_compatible import _cache_hit_ratio, _safe_token_count, extract_json_object, has_decision_payload
 from prompting import build_prompt_parts
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 
@@ -205,6 +205,8 @@ class GeminiProvider:
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
             parsed = extract_json_object(text)
+            if not has_decision_payload(parsed):
+                raise ValueError("missing decision payload")
         except (ValueError, TypeError, json.JSONDecodeError):
             return self._error_result(
                 category="json_parse_error",

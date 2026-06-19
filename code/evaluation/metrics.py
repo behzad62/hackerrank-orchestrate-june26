@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from pathlib import Path
 
 
@@ -24,6 +25,17 @@ ERROR_COLUMNS = [
     "risk_flags_predicted",
     "model_summary",
 ]
+
+CORE_DECISION_FIELDS = {
+    "claim_status",
+    "issue_type",
+    "object_part",
+    "evidence_standard_met",
+    "risk_flags",
+    "supporting_image_ids",
+    "valid_image",
+    "severity",
+}
 
 
 def _flag_set(value: str) -> set[str]:
@@ -72,6 +84,42 @@ def supporting_image_id_scores(expected: list[str], predicted: list[str]) -> dic
             overlaps.append((len(exp_set & pred_set) / len(union)) if union else 1.0)
         average_jaccard = sum(overlaps) / total
     return {**scores, "average_jaccard": average_jaccard}
+
+
+def core_decision_error_analysis(errors: list[dict[str, str]]) -> dict[str, object]:
+    core_errors = [error for error in errors if error.get("field") in CORE_DECISION_FIELDS]
+    field_counts = Counter(error.get("field", "unknown") for error in core_errors)
+    claim_status_pairs: Counter[tuple[str, str]] = Counter()
+    issue_type_pairs: Counter[tuple[str, str]] = Counter()
+    severity_pairs: Counter[tuple[str, str]] = Counter()
+    risk_flag_false_positives: Counter[str] = Counter()
+    risk_flag_false_negatives: Counter[str] = Counter()
+    for error in core_errors:
+        expected = error.get("expected", "")
+        predicted = error.get("predicted", "")
+        field = error.get("field")
+        if field == "claim_status":
+            claim_status_pairs[(expected, predicted)] += 1
+        elif field == "issue_type":
+            issue_type_pairs[(expected, predicted)] += 1
+        elif field == "severity":
+            severity_pairs[(expected, predicted)] += 1
+        elif field == "risk_flags":
+            expected_flags = _flag_set(expected)
+            predicted_flags = _flag_set(predicted)
+            for flag in sorted(predicted_flags - expected_flags):
+                risk_flag_false_positives[flag] += 1
+            for flag in sorted(expected_flags - predicted_flags):
+                risk_flag_false_negatives[flag] += 1
+    return {
+        "core_error_count": len(core_errors),
+        "field_counts": dict(field_counts),
+        "claim_status_pairs": dict(claim_status_pairs),
+        "issue_type_pairs": dict(issue_type_pairs),
+        "severity_pairs": dict(severity_pairs),
+        "risk_flag_false_positives": dict(risk_flag_false_positives),
+        "risk_flag_false_negatives": dict(risk_flag_false_negatives),
+    }
 
 
 def justification_quality_metrics(predicted: list[dict[str, str]]) -> dict[str, float]:

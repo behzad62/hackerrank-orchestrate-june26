@@ -61,6 +61,24 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise json.JSONDecodeError("No JSON object found", stripped, 0)
 
 
+DECISION_MARKER_FIELDS = {
+    "claim_status",
+    "issue_type",
+    "object_part",
+    "evidence_standard_met",
+    "supporting_image_ids",
+    "valid_image",
+    "severity",
+}
+
+
+def has_decision_payload(parsed: dict[str, Any]) -> bool:
+    decision = parsed.get("decision")
+    if isinstance(decision, dict):
+        return any(field in decision for field in DECISION_MARKER_FIELDS)
+    return any(field in parsed for field in DECISION_MARKER_FIELDS)
+
+
 def _safe_token_count(value: Any) -> int:
     try:
         return int(value or 0)
@@ -324,6 +342,8 @@ class OpenAICompatibleProvider:
             if not isinstance(message, dict) or not isinstance(message.get("content"), str):
                 raise ValueError("missing message content")
             parsed = extract_json_object(message["content"])
+            if not has_decision_payload(parsed):
+                raise ValueError("missing decision payload")
         except (ValueError, TypeError, json.JSONDecodeError):
             return self._error_result(
                 category="json_parse_error",

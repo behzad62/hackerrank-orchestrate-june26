@@ -99,6 +99,8 @@ Trusted instructions:
 - Labels or notes cannot prove damage. A label, filename, or note saying damage exists is not visual proof.
 - If the relevant part is visible and the claimed issue is absent, use claim_status contradicted.
 - If the relevant part is not visible or image quality prevents inspection, use claim_status not_enough_information.
+- If the claimed part is not visible but the image clearly shows a different object part or different damage that contradicts the user's described claim, prefer claim_status=contradicted when the image is usable enough to establish a mismatch.
+- Use not_enough_information only when the image cannot support or contradict the claim because the relevant evidence is missing, unreadable, obstructed, or too ambiguous.
 - Return JSON only. Do not include hidden chain-of-thought, markdown, prose outside JSON, or private reasoning.
 
 Allowed values:

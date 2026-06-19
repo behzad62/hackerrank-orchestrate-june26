@@ -5,7 +5,13 @@ from typing import Any
 
 import requests
 
-from providers.openai_compatible import _cache_hit_ratio, _safe_token_count, categorize_http_error, extract_json_object
+from providers.openai_compatible import (
+    _cache_hit_ratio,
+    _safe_token_count,
+    categorize_http_error,
+    extract_json_object,
+    has_decision_payload,
+)
 from prompting import build_prompt_parts
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 
@@ -183,6 +189,8 @@ class AnthropicProvider:
             if not text_parts:
                 raise ValueError("missing text content")
             parsed = extract_json_object("\n".join(text_parts))
+            if not has_decision_payload(parsed):
+                raise ValueError("missing decision payload")
         except (ValueError, TypeError):
             return self._error_result(
                 category="json_parse_error",

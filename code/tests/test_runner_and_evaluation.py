@@ -221,6 +221,7 @@ from pathlib import Path
 from config import AppConfig
 from data import load_claim_rows
 from runner import (
+    _cache_payload_is_trustworthy,
     _effective_prompt_version,
     _sleep_seconds,
     build_provider,
@@ -229,6 +230,7 @@ from runner import (
 from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
 from evaluation.metrics import (
+    core_decision_error_analysis,
     compare_rows,
     justification_quality_metrics,
     risk_flag_scores,
@@ -502,6 +504,77 @@ def test_run_predictions_retries_retryable_provider_errors(monkeypatch, tmp_path
     assert rows[0]["supporting_image_ids"] == "img_1"
     log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
     assert '"error_category": "server_error"' in log_text
+
+
+def test_run_predictions_retries_valid_json_without_decision_payload(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=1,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class MalformedThenValidProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            if self.calls == 1:
+                return ProviderResult(
+                    raw_json={"status": "ok"},
+                    metadata=ProviderMetadata(provider="openai", model="test-model"),
+                )
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openai", model="test-model"),
+            )
+
+    provider = MalformedThenValidProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: provider)
+    monkeypatch.setattr("runner.time.sleep", lambda seconds: None)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert provider.calls == 2
+    assert rows[0]["claim_status"] == "supported"
+    log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
+    assert '"error_category": "json_parse_error"' in log_text
+
+
+def test_cache_payload_rejects_json_without_decision_payload():
+    assert not _cache_payload_is_trustworthy(
+        {
+            "raw_json": {"status": "ok"},
+            "metadata": {"provider": "openrouter", "model": "minimax/minimax-m3"},
+            "used_fallback": False,
+        }
+    )
+    assert _cache_payload_is_trustworthy(
+        {
+            "raw_json": {"decision": {"claim_status": "supported"}},
+            "metadata": {"provider": "openrouter", "model": "minimax/minimax-m3"},
+            "used_fallback": False,
+        }
+    )
 
 
 def test_run_predictions_uses_backup_after_operational_provider_failure(monkeypatch, tmp_path):
@@ -1294,6 +1367,26 @@ def test_write_errors_csv_outputs_expected_columns(tmp_path):
     assert rows[0]["predicted"] == "contradicted"
 
 
+def test_core_decision_error_analysis_excludes_free_text_fields():
+    errors = [
+        {"field": "claim_status_justification", "expected": "a", "predicted": "b"},
+        {"field": "evidence_standard_met_reason", "expected": "x", "predicted": "y"},
+        {"field": "claim_status", "expected": "supported", "predicted": "contradicted"},
+        {"field": "issue_type", "expected": "scratch", "predicted": "dent"},
+        {"field": "severity", "expected": "low", "predicted": "medium"},
+        {"field": "risk_flags", "expected": "claim_mismatch", "predicted": "none"},
+    ]
+
+    analysis = core_decision_error_analysis(errors)
+
+    assert analysis["core_error_count"] == 4
+    assert "claim_status_justification" not in analysis["field_counts"]
+    assert analysis["claim_status_pairs"][("supported", "contradicted")] == 1
+    assert analysis["issue_type_pairs"][("scratch", "dent")] == 1
+    assert analysis["severity_pairs"][("low", "medium")] == 1
+    assert analysis["risk_flag_false_negatives"]["claim_mismatch"] == 1
+
+
 def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
     report_path = tmp_path / "evaluation_report.md"
     metrics = {
@@ -1654,6 +1747,8 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
     report = report_path.read_text(encoding="utf-8")
     assert "## Strategies Compared" in report
     assert "## Final Strategy Used For output.csv" in report
+    assert "## Core Decision Error Analysis" in report
+    assert "claim_status_justification" not in report.split("## Core Decision Error Analysis", 1)[1].split("## Error Analysis", 1)[0]
     assert "- Strategy name: none-fallback" in report
     assert "## Operational Analysis" in report
     assert "Token source:" in report

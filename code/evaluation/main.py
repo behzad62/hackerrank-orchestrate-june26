@@ -17,6 +17,7 @@ from config import AppConfig, build_common_arg_parser, load_env_file, parse_mode
 from data import load_claim_rows, load_evidence_requirements, load_user_history
 from evaluation.metrics import (
     compare_rows,
+    core_decision_error_analysis,
     write_errors_csv,
     write_metrics_json,
 )
@@ -440,6 +441,46 @@ def _format_error_analysis(errors: list[dict[str, str]]) -> str:
     return f"Top field errors:\n{count_lines}\n\nExamples:\n" + "\n".join(examples)
 
 
+def _format_pair_counts(title: str, pairs: dict[tuple[str, str], int]) -> str:
+    if not pairs:
+        return f"{title}:\n- none"
+    lines = [
+        f"- expected `{expected}`, predicted `{predicted}`: {count}"
+        for (expected, predicted), count in sorted(pairs.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return f"{title}:\n" + "\n".join(lines)
+
+
+def _format_flag_counts(title: str, counts: dict[str, int]) -> str:
+    if not counts:
+        return f"{title}:\n- none"
+    return f"{title}:\n" + "\n".join(
+        f"- {flag}: {count}" for flag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
+
+
+def _format_core_decision_error_analysis(errors: list[dict[str, str]]) -> str:
+    analysis = core_decision_error_analysis(errors)
+    field_counts = analysis.get("field_counts", {})
+    if field_counts:
+        field_lines = "\n".join(
+            f"- {field}: {count}" for field, count in sorted(field_counts.items(), key=lambda item: (-item[1], item[0]))
+        )
+    else:
+        field_lines = "- none"
+    return "\n\n".join(
+        [
+            f"Core decision error count: {analysis.get('core_error_count', 0)}",
+            "Core field errors:\n" + field_lines,
+            _format_pair_counts("Claim status mistakes", analysis.get("claim_status_pairs", {})),
+            _format_pair_counts("Issue type mistakes", analysis.get("issue_type_pairs", {})),
+            _format_pair_counts("Severity mistakes", analysis.get("severity_pairs", {})),
+            _format_flag_counts("Risk flag false positives", analysis.get("risk_flag_false_positives", {})),
+            _format_flag_counts("Risk flag false negatives", analysis.get("risk_flag_false_negatives", {})),
+        ]
+    )
+
+
 def _format_justification_quality(metrics: dict) -> str:
     quality = metrics.get("justification_quality", {})
     return "\n".join(
@@ -550,6 +591,10 @@ def _write_multi_strategy_report(
 ### Justification Quality
 
 {_format_justification_quality(final_metrics)}
+
+## Core Decision Error Analysis
+
+{_format_core_decision_error_analysis(final_result.errors)}
 
 ## Error Analysis
 

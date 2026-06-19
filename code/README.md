@@ -41,8 +41,8 @@ VLM_REASONING_EFFORT=low
 VLM_REASONING_MAX_TOKENS=0
 VLM_REASONING_EXCLUDE=true
 ALLOW_NO_VISION_FALLBACK=false
-VLM_MODEL_PRICES=openrouter:qwen/qwen3.7-plus=0.32,1.28;gemini:gemini-3.5-flash=1.50,9.00
-EVAL_STRATEGIES=openrouter-minimax=openrouter:minimax/minimax-m3;none-fallback=none:none
+VLM_MODEL_PRICES=gemini:gemini-3.5-flash=1.50,9.00;openrouter:minimax/minimax-m3=0.30,1.20
+EVAL_STRATEGIES=openrouter-minimax=openrouter:minimax/minimax-m3;gemini-flash=gemini:gemini-3.5-flash
 FINAL_STRATEGY=openrouter-minimax
 EVAL_IGNORE_CACHE=false
 CACHE_WRITE_ENABLED=true
@@ -53,6 +53,8 @@ CACHE_WRITE_ENABLED=true
 `VLM_BACKUP_CHAIN` is only used when `ALLOW_BACKUP_VLM=true`. Backup VLMs are reliability fallbacks for provider/runtime failures such as exhausted quota, rate limits after retries, timeouts, server errors, truncated responses, malformed JSON, or temporary network errors. They are not used when the primary model returns a valid prediction such as `contradicted` or `not_enough_information`.
 
 `VLM_REASONING_ENABLED` enables provider reasoning controls when the selected model supports them. `VLM_REASONING_EFFORT` accepts OpenRouter-style levels such as `minimal`, `low`, `medium`, `high`, `xhigh`, and `none`; native Gemini maps this to `thinkingLevel`. `VLM_REASONING_EXCLUDE=true` asks compatible providers not to return reasoning text in the response, which keeps JSON extraction cleaner.
+
+If Gemini returns a provider `bad_request` while reasoning controls are enabled, set `VLM_REASONING_ENABLED=false`. Gemini structured JSON plus image review is sufficient for this task, and reasoning mode may create provider-specific payload issues.
 
 `VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. Unlisted provider/model pairs are treated as `$0` in evaluation cost estimates until explicitly configured.
 
@@ -87,6 +89,12 @@ Fresh two-strategy evaluation:
 
 ```bash
 python code/evaluation/main.py --env .env --ignore-cache --strategy openrouter-minimax=openrouter:minimax/minimax-m3 --strategy none-fallback=none:none --final-strategy openrouter-minimax --no-fallback
+```
+
+Fresh Minimax vs Gemini evaluation:
+
+```bash
+python code/evaluation/main.py --env .env --ignore-cache --strategy openrouter-minimax=openrouter:minimax/minimax-m3 --strategy gemini-flash=gemini:gemini-3.5-flash --final-strategy openrouter-minimax --no-fallback
 ```
 
 Cached repeat evaluation:
