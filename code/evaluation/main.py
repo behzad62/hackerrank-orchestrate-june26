@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
+import shutil
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 CODE_DIR = Path(__file__).resolve().parents[1]
@@ -11,10 +14,18 @@ if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
 from config import AppConfig, build_common_arg_parser, load_env_file, parse_model_prices
-from data import load_claim_rows
-from evaluation.metrics import compare_rows, write_errors_csv, write_metrics_json
-from runner import run_predictions
-from schemas import OUTPUT_COLUMNS
+from data import load_claim_rows, load_evidence_requirements, load_user_history
+from evaluation.metrics import (
+    compare_rows,
+    write_errors_csv,
+    write_metrics_json,
+)
+from evaluation.strategies import EvalStrategy, default_strategies, parse_strategies
+from images import prepare_images
+from prompting import build_text_prompt
+from runner import _selected_requirements, run_predictions
+from schemas import AppPaths, OUTPUT_COLUMNS, PredictionContext
+from security import detect_prompt_injection_flags
 
 
 HIGH_VALUE_FIELDS = [
@@ -25,6 +36,36 @@ HIGH_VALUE_FIELDS = [
     "valid_image",
     "severity",
 ]
+
+
+@dataclass(frozen=True)
+class TokenEstimate:
+    source: str
+    sample_prompt_tokens: int
+    sample_completion_tokens: int
+    sample_cached_tokens: int
+    sample_cache_write_tokens: int
+    sample_latency_ms: int
+    calls_by_model: dict[tuple[str, str], dict[str, int]]
+
+
+@dataclass(frozen=True)
+class StrategyResult:
+    strategy: EvalStrategy
+    run_dir: Path
+    predictions_path: Path
+    errors_path: Path
+    metrics_path: Path
+    log_path: Path
+    metrics: dict
+    errors: list[dict[str, str]]
+    run_summary: dict[str, object]
+    token_estimate: TokenEstimate
+    estimated_full_test_cost: float
+    projected_prompt_tokens: int
+    projected_completion_tokens: int
+    estimated_runtime_seconds: float
+    price_warning: str = ""
 
 
 def _count_images(rows: list[dict[str, str]]) -> int:
@@ -344,6 +385,241 @@ def _format_backup_reason_lines(backup_reasons: dict[str, int]) -> str:
     return "\n".join(f"- {reason}: {count}" for reason, count in sorted(backup_reasons.items()))
 
 
+def _format_strategy_table(results: list[StrategyResult]) -> str:
+    header = (
+        "| Strategy | Provider | Model | Fresh calls | Cache hits | Fallback rows | "
+        "claim_status | issue_type | object_part | severity | Risk F1 | Image ID F1 | Est. full-test cost |"
+    )
+    separator = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    rows = [header, separator]
+    for result in results:
+        accuracy = result.metrics.get("field_accuracy", {})
+        risk_scores = result.metrics.get("risk_flag_scores", {})
+        image_scores = result.metrics.get("supporting_image_id_scores", {})
+        summary = result.run_summary
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    result.strategy.name,
+                    result.strategy.provider,
+                    result.strategy.model or "none",
+                    str(int(summary.get("model_calls") or 0)),
+                    str(int(summary.get("cache_hits") or 0)),
+                    str(int(summary.get("fallback_rows") or 0)),
+                    f"{float(accuracy.get('claim_status', 0.0)):.3f}",
+                    f"{float(accuracy.get('issue_type', 0.0)):.3f}",
+                    f"{float(accuracy.get('object_part', 0.0)):.3f}",
+                    f"{float(accuracy.get('severity', 0.0)):.3f}",
+                    f"{float(risk_scores.get('f1', 0.0)):.3f}",
+                    f"{float(image_scores.get('f1', 0.0)):.3f}",
+                    f"${result.estimated_full_test_cost:.4f}",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def _format_error_analysis(errors: list[dict[str, str]]) -> str:
+    if not errors:
+        return "- No field mismatches found."
+    counts: dict[str, int] = {}
+    for error in errors:
+        field = error.get("field", "unknown")
+        counts[field] = counts.get(field, 0) + 1
+    count_lines = "\n".join(
+        f"- {field}: {count}" for field, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    )
+    examples = []
+    for error in errors[:3]:
+        examples.append(
+            f"- Row {error.get('row_index', '?')} `{error.get('field', '')}`: "
+            f"expected `{error.get('expected', '')}`, predicted `{error.get('predicted', '')}`"
+        )
+    return f"Top field errors:\n{count_lines}\n\nExamples:\n" + "\n".join(examples)
+
+
+def _format_justification_quality(metrics: dict) -> str:
+    quality = metrics.get("justification_quality", {})
+    return "\n".join(
+        [
+            f"- Evidence reason non-empty rate: {float(quality.get('evidence_standard_met_reason_non_empty_rate', 0.0)):.3f}",
+            f"- Claim justification non-empty rate: {float(quality.get('claim_status_justification_non_empty_rate', 0.0)):.3f}",
+            f"- Claim justification mentions image ID rate: {float(quality.get('claim_status_justification_mentions_image_id_rate', 0.0)):.3f}",
+            f"- Average claim justification length: {float(quality.get('average_justification_length', 0.0)):.1f} chars",
+        ]
+    )
+
+
+def _format_backup_chain(cfg: AppConfig) -> str:
+    if not cfg.backup_chain:
+        return "none"
+    return ",".join(f"{spec.provider}:{spec.model}" for spec in cfg.backup_chain)
+
+
+def _write_multi_strategy_report(
+    path: Path,
+    strategy_results: list[StrategyResult],
+    final_result: StrategyResult,
+    final_reason: str,
+    sample_rows: list[dict[str, str]],
+    test_rows: list[dict[str, str]],
+    cfg: AppConfig,
+) -> None:
+    final_metrics = final_result.metrics
+    final_scores = final_metrics.get("risk_flag_scores", {})
+    final_image_scores = final_metrics.get("supporting_image_id_scores", {})
+    final_summary = final_result.run_summary
+    token_estimate = final_result.token_estimate
+    token_call_count = sum(int(usage.get("calls", 0)) for usage in token_estimate.calls_by_model.values())
+    avg_latency_seconds = (
+        token_estimate.sample_latency_ms / token_call_count / 1000
+        if token_call_count
+        else 0.0
+    )
+    real_vlm_count = sum(1 for result in strategy_results if result.strategy.provider != "none")
+    comparison_warning = (
+        ""
+        if real_vlm_count >= 2
+        else "\n\nWarning: fewer than two real VLM strategies were configured; include another provider/model strategy for a stronger comparison."
+    )
+    price_warnings = [result.price_warning for result in strategy_results if result.price_warning]
+    price_warning_text = "\n".join(f"- {warning}" for warning in price_warnings) if price_warnings else "- none"
+    backup_reason_lines = _format_backup_reason_lines(dict(final_summary.get("backup_reasons") or {}))
+    model_price_lines = _format_model_price_lines(
+        token_estimate.calls_by_model,
+        parse_model_prices(os.environ.get("VLM_MODEL_PRICES", "")),
+        0.0,
+        0.0,
+    )
+    tpm_total = final_result.projected_prompt_tokens + final_result.projected_completion_tokens
+    final_command = (
+        "python code/main.py --env .env "
+        f"--provider {final_result.strategy.provider} --model {final_result.strategy.model or 'none'} "
+        + ("--no-fallback" if not cfg.allow_no_vision_fallback else "--fallback")
+    )
+    report = f"""# Evaluation Report
+
+## Strategies Compared
+
+{_format_strategy_table(strategy_results)}
+{comparison_warning}
+
+## Final Strategy Used For output.csv
+
+- Strategy name: {final_result.strategy.name}
+- Provider: {final_result.strategy.provider}
+- Model: {final_result.strategy.model or 'none'}
+- Backup chain: {_format_backup_chain(cfg)}
+- Fallback allowed for final: {str(cfg.allow_no_vision_fallback).lower()}
+- Max concurrency: {cfg.max_concurrency}
+- RPM limit: {cfg.requests_per_minute}
+- Prompt cache: {'enabled' if cfg.prompt_cache_enabled else 'disabled'}
+- Reason selected: {final_reason}
+- Final output command: `{final_command}`
+
+## Final Strategy Sample Metrics
+
+- Rows expected: {final_metrics.get('rows_expected', 0)}
+- Rows predicted: {final_metrics.get('rows_predicted', 0)}
+- Rows compared: {final_metrics.get('rows_compared', 0)}
+- Error count: {final_metrics.get('error_count', 0)}
+
+### High-Value Field Accuracy
+
+{_format_field_accuracy(final_metrics, HIGH_VALUE_FIELDS)}
+
+### All Evaluated Field Accuracy
+
+{_format_field_accuracy(final_metrics, list(final_metrics.get('field_accuracy', {}).keys()))}
+
+### Risk Flags
+
+- Precision: {float(final_scores.get('precision', 0.0)):.3f}
+- Recall: {float(final_scores.get('recall', 0.0)):.3f}
+- F1: {float(final_scores.get('f1', 0.0)):.3f}
+
+### Supporting Image IDs
+
+- Set precision: {float(final_image_scores.get('precision', 0.0)):.3f}
+- Set recall: {float(final_image_scores.get('recall', 0.0)):.3f}
+- Set F1: {float(final_image_scores.get('f1', 0.0)):.3f}
+- Average Jaccard overlap: {float(final_image_scores.get('average_jaccard', 0.0)):.3f}
+
+### Justification Quality
+
+{_format_justification_quality(final_metrics)}
+
+## Error Analysis
+
+{_format_error_analysis(final_result.errors)}
+
+## Operational Analysis
+
+Sample set:
+- Rows: {len(sample_rows)}
+- Images: {_count_images(sample_rows)}
+- Fresh model calls: {int(final_summary.get('model_calls') or 0)}
+- Cache hits: {int(final_summary.get('cache_hits') or 0)}
+- Fallback rows: {int(final_summary.get('fallback_rows') or 0)}
+- Backup calls: {int(final_summary.get('backup_provider_calls') or 0)}
+- Prompt tokens: {token_estimate.sample_prompt_tokens}
+- Completion tokens: {token_estimate.sample_completion_tokens}
+- Cached/read tokens: {token_estimate.sample_cached_tokens}
+- Cache write tokens: {token_estimate.sample_cache_write_tokens}
+- Runtime: {int(final_summary.get('run_total_duration_ms') or 0) / 1000:.2f}s
+- Average latency per token-baseline call: {avg_latency_seconds:.2f}s
+
+Backup reasons:
+{backup_reason_lines}
+
+Test set:
+- Rows: {len(test_rows)}
+- Images: {_count_images(test_rows)}
+- Expected model calls: {int(final_summary.get('test_model_calls') or 0)}
+- Projected input tokens: {final_result.projected_prompt_tokens}
+- Projected output tokens: {final_result.projected_completion_tokens}
+- Estimated full-test cost: ${final_result.estimated_full_test_cost:.4f}
+- Estimated full-test summed provider latency: {final_result.estimated_runtime_seconds:.2f}s
+
+Rate limits and operations:
+- Configured max concurrency: {cfg.max_concurrency}
+- Configured RPM limit: {cfg.requests_per_minute}
+- Approximate TPM requirement: {tpm_total} tokens across the projected full test; divide by intended runtime minutes for required TPM.
+- Retry strategy: bounded retries for rate limits, server errors, timeouts, truncated responses, malformed JSON, and temporary network errors.
+- Backup strategy: backup VLM chain is used only for provider/runtime failures, not for valid model judgments.
+- Caching strategy: response cache keys include provider, model, effective prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
+
+Pricing assumptions:
+- Prices are read from `VLM_MODEL_PRICES` as `provider:model=input,output` in dollars per 1M tokens.
+- Missing provider/model prices are treated as $0 and explicitly warned about below.
+- Model-specific prices:
+{model_price_lines}
+- Price warnings:
+{price_warning_text}
+
+## Caching Notes
+
+- Token source: {token_estimate.source}
+- Prompt cache enabled: {str(cfg.prompt_cache_enabled).lower()}
+- Response cache ignore mode: {str(cfg.ignore_cache).lower()}
+- Response cache write enabled: {str(cfg.cache_write_enabled).lower()}
+- If token source is approximate prompt-size estimate, input tokens are estimated from prompt characters and output tokens use the configured max-output budget as a conservative bound.
+- Image token usage: provider-specific or unavailable unless provider metadata includes it in prompt token accounting.
+
+## Known Limitations
+
+- No-vision fallback is intentionally conservative and should not be used for final predictions unless explicitly allowed.
+- Fallback output does not inspect image content and reports `not_enough_information`.
+- AVIF images require a local decoder through `pillow-avif-plugin`; unsupported conversion marks the image unreadable.
+- Text found in images is treated as untrusted and can add `text_instruction_present`.
+- Free-text justification exact-match scores are kept in all-field metrics, but justification quality is reported separately because exact text does not need to match sample wording.
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report, encoding="utf-8")
+
+
 def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Path) -> Path:
     if output_arg is None:
         return default_evaluation_dir / "sample_predictions.csv"
@@ -352,6 +628,199 @@ def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Pa
     if output_arg.suffix:
         return output_arg
     return output_arg / "sample_predictions.csv"
+
+
+def _strategy_score(metrics: dict) -> float:
+    accuracy = metrics.get("field_accuracy", {})
+    risk_scores = metrics.get("risk_flag_scores", {})
+    return (
+        0.35 * float(accuracy.get("claim_status", 0.0))
+        + 0.20 * float(accuracy.get("issue_type", 0.0))
+        + 0.20 * float(accuracy.get("object_part", 0.0))
+        + 0.10 * float(accuracy.get("evidence_standard_met", 0.0))
+        + 0.10 * float(accuracy.get("valid_image", 0.0))
+        + 0.05 * float(risk_scores.get("f1", 0.0))
+    )
+
+
+def _apply_strategy(cfg: AppConfig, strategy: EvalStrategy, run_dir: Path) -> AppConfig:
+    if cfg.paths is None:
+        raise ValueError("AppConfig.paths is required")
+    strategy_paths = replace(
+        cfg.paths,
+        logs_dir=run_dir,
+        output_csv=run_dir / "sample_predictions.csv",
+    )
+    return replace(
+        cfg,
+        provider=strategy.provider,
+        model=strategy.model,
+        prompt_version=strategy.prompt_version or cfg.prompt_version,
+        reasoning_enabled=(
+            strategy.reasoning_enabled if strategy.reasoning_enabled is not None else cfg.reasoning_enabled
+        ),
+        reasoning_effort=strategy.reasoning_effort or cfg.reasoning_effort,
+        max_output_tokens=strategy.max_output_tokens or cfg.max_output_tokens,
+        prompt_cache_enabled=(
+            strategy.prompt_cache_enabled
+            if strategy.prompt_cache_enabled is not None
+            else cfg.prompt_cache_enabled
+        ),
+        paths=strategy_paths,
+    )
+
+
+def _estimate_prompt_size_tokens(rows: list[dict[str, str]], paths: AppPaths) -> int:
+    user_history = load_user_history(paths.user_history_csv)
+    all_requirements = load_evidence_requirements(paths.evidence_requirements_csv)
+    total_chars = 0
+    for row_index, row in enumerate(rows, start=1):
+        prepared_images = prepare_images(paths.repo_root, row.get("image_paths", ""), paths.images_dir)
+        history = user_history.get(row.get("user_id", ""), {})
+        requirements = _selected_requirements(all_requirements, row.get("claim_object", ""))
+        context = PredictionContext(
+            row_index=row_index,
+            row=row,
+            user_history=history,
+            evidence_requirements=requirements,
+            all_evidence_requirements=all_requirements,
+            prepared_images=prepared_images,
+            claim_text_risk_flags=detect_prompt_injection_flags(row.get("user_claim", "")),
+        )
+        total_chars += len(build_text_prompt(context))
+    return int(math.ceil(total_chars / 4))
+
+
+def _token_estimate_from_summary(
+    cfg: AppConfig,
+    strategy: EvalStrategy,
+    sample_rows: list[dict[str, str]],
+    summary: dict[str, object],
+) -> TokenEstimate:
+    prompt_tokens = int(summary.get("prompt_tokens") or 0)
+    completion_tokens = int(summary.get("completion_tokens") or 0)
+    calls_by_model = dict(summary.get("calls_by_model") or {})
+    if prompt_tokens or completion_tokens:
+        return TokenEstimate(
+            source=str(summary.get("token_source") or "fresh provider metadata"),
+            sample_prompt_tokens=prompt_tokens,
+            sample_completion_tokens=completion_tokens,
+            sample_cached_tokens=int(summary.get("cached_tokens") or 0),
+            sample_cache_write_tokens=int(summary.get("cache_write_tokens") or 0),
+            sample_latency_ms=int(summary.get("latency_ms") or 0),
+            calls_by_model=calls_by_model,
+        )
+    if strategy.provider == "none" or cfg.paths is None:
+        return TokenEstimate(
+            source="no provider tokens",
+            sample_prompt_tokens=0,
+            sample_completion_tokens=0,
+            sample_cached_tokens=0,
+            sample_cache_write_tokens=0,
+            sample_latency_ms=0,
+            calls_by_model={},
+        )
+    estimated_prompt_tokens = _estimate_prompt_size_tokens(sample_rows, cfg.paths)
+    estimated_completion_tokens = len(sample_rows) * max(1, cfg.max_output_tokens)
+    return TokenEstimate(
+        source="approximate prompt-size estimate",
+        sample_prompt_tokens=estimated_prompt_tokens,
+        sample_completion_tokens=estimated_completion_tokens,
+        sample_cached_tokens=0,
+        sample_cache_write_tokens=0,
+        sample_latency_ms=0,
+        calls_by_model={
+            (strategy.provider, strategy.model): {
+                "calls": len(sample_rows),
+                "prompt_tokens": estimated_prompt_tokens,
+                "completion_tokens": estimated_completion_tokens,
+            }
+        },
+    )
+
+
+def _price_warning(
+    strategy: EvalStrategy,
+    model_prices: dict[tuple[str, str], tuple[float, float]],
+) -> str:
+    if strategy.provider == "none":
+        return ""
+    key = (strategy.provider.strip().lower(), strategy.model.strip())
+    if key not in model_prices:
+        return f"No price configured for {strategy.provider}/{strategy.model}; cost may be underestimated."
+    return ""
+
+
+def _build_strategy_result(
+    strategy: EvalStrategy,
+    run_dir: Path,
+    predictions: list[dict[str, str]],
+    expected: list[dict[str, str]],
+    test_rows: list[dict[str, str]],
+    fields: list[str],
+    cfg: AppConfig,
+    model_prices: dict[tuple[str, str], tuple[float, float]],
+) -> StrategyResult:
+    metrics, errors = compare_rows(expected, predictions, fields=fields)
+    predictions_path = run_dir / "sample_predictions.csv"
+    errors_path = run_dir / "errors.csv"
+    metrics_path = run_dir / "metrics.json"
+    log_path = run_dir / "run.jsonl"
+    _write_predictions_csv(predictions_path, predictions)
+    write_errors_csv(errors_path, errors)
+    write_metrics_json(metrics_path, metrics)
+    summary = _latest_run_provider_summary(log_path)
+    token_estimate = _token_estimate_from_summary(cfg, strategy, expected, summary)
+    row_scale = (len(test_rows) / len(expected)) if expected else 0.0
+    projected_prompt_tokens = int(round(token_estimate.sample_prompt_tokens * row_scale))
+    projected_completion_tokens = int(round(token_estimate.sample_completion_tokens * row_scale))
+    estimated_cost = _estimate_projected_cost(
+        token_estimate.calls_by_model,
+        model_prices,
+        default_input=0.0,
+        default_output=0.0,
+        row_scale=row_scale,
+        fallback_prompt_tokens=projected_prompt_tokens,
+        fallback_completion_tokens=projected_completion_tokens,
+    )
+    token_call_count = sum(int(usage.get("calls", 0)) for usage in token_estimate.calls_by_model.values())
+    avg_latency_seconds = (
+        token_estimate.sample_latency_ms / token_call_count / 1000
+        if token_call_count
+        else 0.0
+    )
+    observed_provider = str(summary.get("observed_provider") or "unknown")
+    test_model_calls = 0 if observed_provider in {"none", "unknown"} else len(test_rows)
+    return StrategyResult(
+        strategy=strategy,
+        run_dir=run_dir,
+        predictions_path=predictions_path,
+        errors_path=errors_path,
+        metrics_path=metrics_path,
+        log_path=log_path,
+        metrics=metrics,
+        errors=errors,
+        run_summary={**summary, "test_model_calls": test_model_calls},
+        token_estimate=token_estimate,
+        estimated_full_test_cost=estimated_cost,
+        projected_prompt_tokens=projected_prompt_tokens,
+        projected_completion_tokens=projected_completion_tokens,
+        estimated_runtime_seconds=avg_latency_seconds * test_model_calls,
+        price_warning=_price_warning(strategy, model_prices),
+    )
+
+
+def _select_final_strategy(
+    strategy_results: list[StrategyResult],
+    final_strategy_name: str,
+) -> tuple[StrategyResult, str]:
+    if final_strategy_name:
+        for result in strategy_results:
+            if result.strategy.name == final_strategy_name:
+                return result, "Selected by FINAL_STRATEGY/--final-strategy."
+        raise ValueError(f"FINAL_STRATEGY did not match any evaluated strategy: {final_strategy_name}")
+    selected = max(strategy_results, key=lambda result: _strategy_score(result.metrics))
+    return selected, "Selected by weighted sample score."
 
 
 def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
@@ -373,6 +842,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "rate_limit_waits": 0,
         "run_total_duration_ms": 0,
         "cache_hits": 0,
+        "token_source": "unavailable",
     }
     if not log_path.exists():
         return summary
@@ -406,6 +876,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             summary["cached_tokens"] = 0
             summary["cache_write_tokens"] = 0
             summary["latency_ms"] = 0
+            summary["token_source"] = "unavailable"
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
             fallback_used = True
@@ -435,12 +906,14 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             if record.get("used_fallback") is True:
                 fallback_used = True
                 fallback_rows += 1
-            elif provider != "none" and record.get("cache_hit") is not True:
-                model_calls += 1
-                if provider == primary_provider:
-                    primary_provider_calls += 1
-                else:
-                    backup_provider_calls += 1
+            elif provider != "none":
+                is_cache_hit = record.get("cache_hit") is True
+                if not is_cache_hit:
+                    model_calls += 1
+                    if provider == primary_provider:
+                        primary_provider_calls += 1
+                    else:
+                        backup_provider_calls += 1
                 key = (provider, model_name)
                 if key not in calls_by_model:
                     calls_by_model[key] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
@@ -452,6 +925,12 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
                 summary["cached_tokens"] = int(summary["cached_tokens"]) + int(record.get("cached_tokens") or 0)
                 summary["cache_write_tokens"] = int(summary["cache_write_tokens"]) + int(record.get("cache_creation_input_tokens") or 0)
                 summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
+                if not is_cache_hit:
+                    summary["token_source"] = "fresh provider metadata"
+                elif summary["token_source"] == "unavailable" and (
+                    int(record.get("prompt_tokens") or 0) or int(record.get("completion_tokens") or 0)
+                ):
+                    summary["token_source"] = "cached provider metadata"
     observed_provider = "unknown"
     if len(providers) == 1:
         observed_provider = next(iter(providers))
@@ -471,6 +950,8 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
 
 def main() -> int:
     parser = build_common_arg_parser("Evaluate claim verification on sample_claims.csv.")
+    parser.add_argument("--strategy", action="append", default=None)
+    parser.add_argument("--final-strategy", default=None)
     args = parser.parse_args()
     load_env_file(args.env)
     cfg = AppConfig.from_env().with_overrides(
@@ -491,6 +972,8 @@ def main() -> int:
         backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
+        ignore_cache=args.ignore_cache,
+        cache_write_enabled=args.cache_write_enabled,
         save_errors=args.save_errors,
     )
     if cfg.paths is None:
@@ -500,68 +983,60 @@ def main() -> int:
     default_evaluation_dir = Path(__file__).resolve().parent
     sample_predictions_path = _sample_predictions_path(args.output, default_evaluation_dir)
     evaluation_dir = sample_predictions_path.parent
+    expected = load_claim_rows(paths.sample_claims_csv)
+    test_rows = load_claim_rows(paths.claims_csv)
+    fields = OUTPUT_COLUMNS[4:]
+    env_strategy_config = "" if args.strategy else os.environ.get("EVAL_STRATEGIES", "")
+    strategies = parse_strategies(args.strategy, env_strategy_config)
+    if not strategies:
+        strategies = default_strategies(cfg.provider, cfg.model)
+    final_strategy_name = (args.final_strategy or os.environ.get("FINAL_STRATEGY", "")).strip()
+    model_prices = parse_model_prices(os.environ.get("VLM_MODEL_PRICES", ""))
+    runs_dir = evaluation_dir / "runs"
+    strategy_results: list[StrategyResult] = []
+    for strategy in strategies:
+        run_dir = runs_dir / strategy.name
+        strategy_cfg = _apply_strategy(cfg, strategy, run_dir)
+        predictions = run_predictions(
+            strategy_cfg,
+            claims_csv=paths.sample_claims_csv,
+            output_csv=run_dir / "sample_predictions.csv",
+        )
+        strategy_results.append(
+            _build_strategy_result(
+                strategy,
+                run_dir,
+                predictions,
+                expected,
+                test_rows,
+                fields,
+                strategy_cfg,
+                model_prices,
+            )
+        )
+
+    final_result, final_reason = _select_final_strategy(strategy_results, final_strategy_name)
     errors_path = evaluation_dir / "errors.csv"
     metrics_path = evaluation_dir / "metrics.json"
     report_path = evaluation_dir / "evaluation_report.md"
-
-    predictions = run_predictions(
-        cfg,
-        claims_csv=paths.sample_claims_csv,
-        output_csv=sample_predictions_path,
-    )
-    expected = load_claim_rows(paths.sample_claims_csv)
-    fields = OUTPUT_COLUMNS[4:]
-    metrics, errors = compare_rows(expected, predictions, fields=fields)
-
-    _write_predictions_csv(sample_predictions_path, predictions)
-    write_errors_csv(errors_path, errors)
-    write_metrics_json(metrics_path, metrics)
-    test_rows = load_claim_rows(paths.claims_csv)
-    run_summary = _latest_run_provider_summary(paths.logs_dir / "run.jsonl")
-    observed_provider = str(run_summary["observed_provider"])
-    sample_model_calls = int(run_summary["model_calls"])
-    if observed_provider in {"none", "unknown"}:
-        test_model_calls = 0
-    else:
-        test_model_calls = len(test_rows)
-    input_price_per_million = 0.0
-    output_price_per_million = 0.0
-    model_prices = parse_model_prices(os.environ.get("VLM_MODEL_PRICES", ""))
-    _write_report(
+    shutil.copyfile(final_result.predictions_path, sample_predictions_path)
+    shutil.copyfile(final_result.errors_path, errors_path)
+    shutil.copyfile(final_result.metrics_path, metrics_path)
+    _write_multi_strategy_report(
         report_path,
-        metrics,
+        strategy_results,
+        final_result,
+        final_reason,
         expected,
         test_rows,
-        cfg.provider,
-        cfg.model,
-        observed_provider=observed_provider,
-        fallback_allowed=cfg.allow_no_vision_fallback,
-        fallback_used=cfg.provider == "none" or bool(run_summary["fallback_used"]),
-        sample_model_calls=sample_model_calls,
-        test_model_calls=test_model_calls,
-        sample_prompt_tokens=int(run_summary["prompt_tokens"]),
-        sample_completion_tokens=int(run_summary["completion_tokens"]),
-        sample_cached_tokens=int(run_summary["cached_tokens"]),
-        sample_cache_write_tokens=int(run_summary["cache_write_tokens"]),
-        sample_latency_ms=int(run_summary["latency_ms"]),
-        input_price_per_million=input_price_per_million,
-        output_price_per_million=output_price_per_million,
-        model_prices=model_prices,
-        calls_by_model=run_summary["calls_by_model"],
-        backup_reasons=run_summary["backup_reasons"],
-        primary_provider_calls=int(run_summary["primary_provider_calls"]),
-        backup_provider_calls=int(run_summary["backup_provider_calls"]),
-        fallback_rows=int(run_summary["fallback_rows"]),
-        max_concurrency=int(run_summary["max_concurrency"]),
-        rate_limit_waits=int(run_summary["rate_limit_waits"]),
-        run_total_duration_ms=int(run_summary["run_total_duration_ms"]),
-        cache_hits=int(run_summary["cache_hits"]),
+        cfg,
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")
     print(f"Wrote errors to {errors_path}")
     print(f"Wrote metrics to {metrics_path}")
     print(f"Wrote evaluation report to {report_path}")
+    print(f"Wrote strategy runs under {runs_dir}")
     return 0
 
 

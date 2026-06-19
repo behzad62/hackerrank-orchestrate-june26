@@ -219,6 +219,7 @@ import time
 from pathlib import Path
 
 from config import AppConfig
+from data import load_claim_rows
 from runner import (
     _effective_prompt_version,
     _sleep_seconds,
@@ -229,11 +230,19 @@ from schemas import AppPaths, OUTPUT_COLUMNS, ProviderMetadata, ProviderResult
 
 from evaluation.metrics import (
     compare_rows,
+    justification_quality_metrics,
     risk_flag_scores,
     supporting_image_id_scores,
     write_errors_csv,
 )
-from evaluation.main import _latest_run_provider_summary, _price_for_model, _write_report
+from evaluation.main import (
+    _latest_run_provider_summary,
+    _price_for_model,
+    _price_warning,
+    _token_estimate_from_summary,
+    _write_report,
+)
+from evaluation.strategies import EvalStrategy, parse_strategies
 
 
 def write_task7_minimal_dataset(root, user_claim="screen cracked"):
@@ -962,6 +971,141 @@ def test_run_predictions_uses_cache_for_successful_provider_result(monkeypatch, 
     assert len(list(paths.cache_dir.glob("*.json"))) == 1
 
 
+def test_run_predictions_ignore_cache_bypasses_reads_but_writes(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class HealthyProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(
+                    provider="openai",
+                    model="test-model",
+                    prompt_tokens=111,
+                    completion_tokens=22,
+                ),
+            )
+
+    provider = HealthyProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: provider)
+
+    run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+    run_predictions(
+        cfg.with_overrides(ignore_cache=True),
+        claims_csv=paths.claims_csv,
+        output_csv=paths.output_csv,
+    )
+
+    assert provider.calls == 2
+    assert len(list(paths.cache_dir.glob("*.json"))) == 1
+
+
+def test_latest_run_provider_summary_uses_cached_metadata_for_token_estimates(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "run_started", "provider": "openai"}),
+                json.dumps(
+                    {
+                        "event": "provider_response",
+                        "provider": "openai",
+                        "model": "test-model",
+                        "cache_hit": True,
+                        "used_fallback": False,
+                        "prompt_tokens": 120,
+                        "completion_tokens": 30,
+                        "cached_tokens": 90,
+                        "duration_ms": 5000,
+                    }
+                ),
+                json.dumps({"event": "run_completed", "cache_hits": 1}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_run_provider_summary(log_path)
+
+    assert summary["model_calls"] == 0
+    assert summary["prompt_tokens"] == 120
+    assert summary["completion_tokens"] == 30
+    assert summary["cached_tokens"] == 90
+    assert summary["latency_ms"] == 5000
+    assert summary["token_source"] == "cached provider metadata"
+
+
+def test_token_estimate_uses_prompt_size_approximation_when_metadata_missing(tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openrouter",
+        model="minimax/minimax-m3",
+        max_output_tokens=123,
+        paths=paths,
+    )
+    rows = load_claim_rows(paths.sample_claims_csv)
+
+    estimate = _token_estimate_from_summary(
+        cfg,
+        EvalStrategy(name="minimax", provider="openrouter", model="minimax/minimax-m3"),
+        rows,
+        {"calls_by_model": {}, "prompt_tokens": 0, "completion_tokens": 0},
+    )
+
+    assert estimate.source == "approximate prompt-size estimate"
+    assert estimate.sample_prompt_tokens > 0
+    assert estimate.sample_completion_tokens == 123
+    assert estimate.calls_by_model[("openrouter", "minimax/minimax-m3")]["prompt_tokens"] > 0
+
+
+def test_justification_quality_metrics_do_not_require_exact_text_match():
+    metrics = justification_quality_metrics(
+        [
+            {
+                "evidence_standard_met_reason": "Enough visible evidence.",
+                "claim_status_justification": "img_1 shows the cracked screen.",
+            },
+            {
+                "evidence_standard_met_reason": "",
+                "claim_status_justification": "No relevant close-up is visible.",
+            },
+        ]
+    )
+
+    assert metrics["evidence_standard_met_reason_non_empty_rate"] == 0.5
+    assert metrics["claim_status_justification_non_empty_rate"] == 1.0
+    assert metrics["claim_status_justification_mentions_image_id_rate"] == 0.5
+    assert metrics["average_justification_length"] > 0
+
+
 def test_main_cli_accepts_operational_path_and_runtime_overrides(tmp_path):
     write_task7_minimal_dataset(tmp_path)
     output = tmp_path / "predictions.csv"
@@ -1290,6 +1434,40 @@ def test_price_for_model_uses_specific_price_before_default():
     ) == (0.32, 1.28)
 
 
+def test_missing_model_price_produces_warning():
+    warning = _price_warning(
+        EvalStrategy(name="minimax", provider="openrouter", model="minimax/minimax-m3"),
+        model_prices={},
+    )
+
+    assert "No price configured for openrouter/minimax/minimax-m3" in warning
+
+
+def test_parse_eval_strategies_from_env_and_cli():
+    strategies = parse_strategies(
+        ["gemini-flash=gemini:gemini-3.5-flash,reasoning_enabled=true,max_output_tokens=2048"],
+        "openrouter-minimax=openrouter:minimax/minimax-m3;openrouter-qwen=openrouter:qwen/qwen3.7-plus",
+    )
+
+    assert [strategy.name for strategy in strategies] == [
+        "openrouter-minimax",
+        "openrouter-qwen",
+        "gemini-flash",
+    ]
+    assert strategies[0].provider == "openrouter"
+    assert strategies[0].model == "minimax/minimax-m3"
+    assert strategies[2].reasoning_enabled is True
+    assert strategies[2].max_output_tokens == 2048
+
+
+def test_parse_eval_strategies_rejects_duplicate_names():
+    with pytest.raises(ValueError, match="Duplicate strategy name"):
+        parse_strategies(
+            ["same=openrouter:minimax/minimax-m3"],
+            "same=openrouter:qwen/qwen3.7-plus",
+        )
+
+
 def test_latest_run_provider_summary_does_not_count_cache_hits_as_model_calls(tmp_path):
     log_path = tmp_path / "run.jsonl"
     log_path.write_text(
@@ -1446,6 +1624,12 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
             str(tmp_path / "logs"),
             "--provider",
             "none",
+            "--strategy",
+            "configured=none:none",
+            "--strategy",
+            "none-fallback=none:none",
+            "--final-strategy",
+            "none-fallback",
             "--fallback",
         ],
         cwd=Path(__file__).resolve().parents[2],
@@ -1468,5 +1652,10 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert metrics["rows_compared"] == 1
     report = report_path.read_text(encoding="utf-8")
-    assert "images were not inspected" in report
-    assert "cost is $0" in report
+    assert "## Strategies Compared" in report
+    assert "## Final Strategy Used For output.csv" in report
+    assert "- Strategy name: none-fallback" in report
+    assert "## Operational Analysis" in report
+    assert "Token source:" in report
+    assert (evaluation_dir / "runs" / "configured" / "sample_predictions.csv").exists()
+    assert (evaluation_dir / "runs" / "none-fallback" / "run.jsonl").exists()

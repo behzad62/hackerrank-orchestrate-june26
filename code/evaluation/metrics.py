@@ -74,6 +74,37 @@ def supporting_image_id_scores(expected: list[str], predicted: list[str]) -> dic
     return {**scores, "average_jaccard": average_jaccard}
 
 
+def justification_quality_metrics(predicted: list[dict[str, str]]) -> dict[str, float]:
+    total = len(predicted)
+    if not total:
+        return {
+            "evidence_standard_met_reason_non_empty_rate": 0.0,
+            "claim_status_justification_non_empty_rate": 0.0,
+            "claim_status_justification_mentions_image_id_rate": 0.0,
+            "average_justification_length": 0.0,
+        }
+    evidence_non_empty = 0
+    claim_non_empty = 0
+    mentions_image_id = 0
+    total_length = 0
+    for row in predicted:
+        evidence_reason = row.get("evidence_standard_met_reason", "").strip()
+        claim_reason = row.get("claim_status_justification", "").strip()
+        if evidence_reason:
+            evidence_non_empty += 1
+        if claim_reason:
+            claim_non_empty += 1
+        if "img_" in claim_reason.lower():
+            mentions_image_id += 1
+        total_length += len(claim_reason)
+    return {
+        "evidence_standard_met_reason_non_empty_rate": evidence_non_empty / total,
+        "claim_status_justification_non_empty_rate": claim_non_empty / total,
+        "claim_status_justification_mentions_image_id_rate": mentions_image_id / total,
+        "average_justification_length": total_length / total,
+    }
+
+
 def compare_rows(
     expected: list[dict[str, str]],
     predicted: list[dict[str, str]],
@@ -147,6 +178,7 @@ def compare_rows(
                 for idx in range(total)
             ],
         )
+    metrics["justification_quality"] = justification_quality_metrics(predicted)
     return metrics, errors
 
 

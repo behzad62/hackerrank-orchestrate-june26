@@ -564,7 +564,7 @@ def process_claim_row(
         image_hashes=[image.sha256 for image in prepared_images],
         normalizer_version=NORMALIZER_VERSION,
     )
-    cached = read_cache(paths.cache_dir, cache_key)
+    cached = None if cfg.ignore_cache else read_cache(paths.cache_dir, cache_key)
     if cached:
         if _cache_payload_is_trustworthy(cached):
             raw_json = cached.get("raw_json")
@@ -588,7 +588,12 @@ def process_claim_row(
             provider_limiter=provider_limiter,
             backup_semaphore=backup_semaphore,
         )
-        if not backup_used and not result.used_fallback and not result.metadata.error_category:
+        if (
+            cfg.cache_write_enabled
+            and not backup_used
+            and not result.used_fallback
+            and not result.metadata.error_category
+        ):
             write_cache(
                 paths.cache_dir,
                 cache_key,
@@ -676,6 +681,8 @@ def run_predictions(
         fallback_allowed=cfg.allow_no_vision_fallback,
         prompt_cache_enabled=cfg.prompt_cache_enabled,
         prompt_cache_retention=cfg.prompt_cache_retention,
+        ignore_cache=cfg.ignore_cache,
+        cache_write_enabled=cfg.cache_write_enabled,
         output_limit=cfg.max_output_tokens,
         retry_max_sleep_seconds=cfg.retry_max_sleep_seconds,
         reasoning_enabled=cfg.reasoning_enabled,
