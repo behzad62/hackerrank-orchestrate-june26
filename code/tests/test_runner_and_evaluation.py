@@ -629,6 +629,14 @@ def test_risk_flag_scores_are_set_based_precision_recall_f1():
     assert round(scores["f1"], 3) == 0.5
 
 
+def test_risk_flag_scores_treat_none_and_empty_as_no_flags():
+    scores = risk_flag_scores(expected=["none", ""], predicted=["", "none"])
+
+    assert scores["precision"] == 1.0
+    assert scores["recall"] == 1.0
+    assert scores["f1"] == 1.0
+
+
 def test_write_errors_csv_outputs_expected_columns(tmp_path):
     output = tmp_path / "errors.csv"
     write_errors_csv(
@@ -677,7 +685,7 @@ def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_p
             "--images",
             str(tmp_path / "dataset" / "images"),
             "--output",
-            str(tmp_path / "evaluation" / "sample_predictions.csv"),
+            str(tmp_path / "evaluation"),
             "--provider",
             "none",
             "--fallback",

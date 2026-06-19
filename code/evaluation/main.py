@@ -142,6 +142,16 @@ Failure modes observed in logs:
     path.write_text(report, encoding="utf-8")
 
 
+def _sample_predictions_path(output_arg: Path | None, default_evaluation_dir: Path) -> Path:
+    if output_arg is None:
+        return default_evaluation_dir / "sample_predictions.csv"
+    if output_arg.exists() and output_arg.is_dir():
+        return output_arg / "sample_predictions.csv"
+    if output_arg.suffix:
+        return output_arg
+    return output_arg / "sample_predictions.csv"
+
+
 def main() -> int:
     parser = build_common_arg_parser("Evaluate claim verification on sample_claims.csv.")
     args = parser.parse_args()
@@ -166,9 +176,7 @@ def main() -> int:
 
     paths = cfg.paths
     default_evaluation_dir = Path(__file__).resolve().parent
-    sample_predictions_path = (
-        paths.output_csv if args.output is not None else default_evaluation_dir / "sample_predictions.csv"
-    )
+    sample_predictions_path = _sample_predictions_path(args.output, default_evaluation_dir)
     evaluation_dir = sample_predictions_path.parent
     errors_path = evaluation_dir / "errors.csv"
     metrics_path = evaluation_dir / "metrics.json"
