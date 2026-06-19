@@ -21,6 +21,7 @@ VISIBLE_DAMAGE_WORDS = (
     | STAIN_WORDS
     | {"dent", "dented", "deformation", "damage", "damaged", "broken", "crack", "cracked", "missing"}
 )
+ABSENCE_WORDS = {"no damage", "not visible", "absent", "missing evidence", "cannot see", "not shown", "no visible"}
 CONTRADICTION_EVIDENCE_FLAGS = {
     "claim_mismatch",
     "wrong_object",
@@ -117,19 +118,119 @@ def _ordered_flags(flags: list[str]) -> list[str]:
     return output or ["none"]
 
 
+def _split_ids(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(";") if part.strip() and part.strip() != "none"]
+
+
+def _ordered_valid_ids(ids: list[str], available_image_ids: list[str]) -> str:
+    valid = set(available_image_ids)
+    output: list[str] = []
+    for raw_id in ids:
+        image_id = Path(str(raw_id)).stem
+        if image_id in valid and image_id not in output:
+            output.append(image_id)
+    return ";".join(output) if output else "none"
+
+
+def _collect_observations(value: Any) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key in ("visual_observations", "image_observations"):
+            candidate = value.get(key)
+            if isinstance(candidate, list):
+                observations.extend(item for item in candidate if isinstance(item, dict))
+        for nested_key in ("decision", "primary_decision", "candidate_decision", "adjudicator_decision", "visual_facts"):
+            nested = value.get(nested_key)
+            if nested is not None and nested is not value:
+                observations.extend(_collect_observations(nested))
+    elif isinstance(value, list):
+        for item in value:
+            observations.extend(_collect_observations(item))
+    return observations
+
+
+def _observation_image_id(observation: dict[str, Any]) -> str:
+    return Path(str(observation.get("image_id") or "")).stem
+
+
+def _observation_has_visible_issue(observation: dict[str, Any]) -> bool:
+    issues = observation.get("visible_issues")
+    damage = observation.get("visible_damage")
+    text = _flatten_text({"visible_issues": issues, "visible_damage": damage}).lower()
+    if not text:
+        return False
+    if _contains_any(text, ABSENCE_WORDS):
+        return False
+    if isinstance(issues, list) and any(str(issue).strip() and str(issue).strip() not in {"none", "unknown"} for issue in issues):
+        return True
+    if isinstance(damage, list) and any(str(item).strip() for item in damage):
+        return True
+    return _contains_any(text, VISIBLE_DAMAGE_WORDS)
+
+
+def _observation_supports_contradiction(observation: dict[str, Any], issue_type: str, risk_flags: list[str]) -> bool:
+    text = _flatten_text(observation).lower()
+    quality = _flatten_text(observation.get("quality_issues", [])).lower()
+    if issue_type == "none" and (_contains_any(text, ABSENCE_WORDS) or "damage_not_visible" in risk_flags):
+        return True
+    if any(flag in quality or flag.replace("_", " ") in quality for flag in CONTRADICTION_EVIDENCE_FLAGS):
+        return True
+    if _contains_any(text, {"mismatch", "different part", "wrong part", "different object", "wrong object"}):
+        return True
+    if _observation_has_visible_issue(observation) and "claim_mismatch" in risk_flags:
+        return True
+    return False
+
+
 def _ids_from_observations(raw_decision: dict, available_image_ids: list[str]) -> str:
-    ids: list[str] = []
-    observations = raw_decision.get("visual_observations") or raw_decision.get("image_observations")
-    if isinstance(observations, list):
-        for observation in observations:
-            if not isinstance(observation, dict):
-                continue
-            image_id = Path(str(observation.get("image_id") or "")).stem
-            if image_id in available_image_ids and image_id not in ids:
-                ids.append(image_id)
+    ids = [_observation_image_id(obs) for obs in _collect_observations(raw_decision)]
     if not ids and len(available_image_ids) == 1:
         ids.append(available_image_ids[0])
-    return ";".join(ids) if ids else "none"
+    return _ordered_valid_ids(ids, available_image_ids)
+
+
+def _repair_supporting_image_ids(
+    *,
+    claim_status: str,
+    issue_type: str,
+    risk_flags: list[str],
+    supporting_image_ids: str,
+    available_image_ids: list[str],
+    raw_decision: dict,
+    valid_image: bool,
+    repairs: list[dict[str, str]],
+) -> str:
+    if claim_status == "not_enough_information":
+        _append_repair(repairs, "supporting_image_ids", supporting_image_ids, "none", "not_enough_information")
+        return "none"
+
+    observations = _collect_observations(raw_decision)
+    current_ids = _split_ids(supporting_image_ids)
+    repaired_ids: list[str] = []
+
+    if claim_status == "supported":
+        for observation in observations:
+            image_id = _observation_image_id(observation)
+            if image_id and _observation_has_visible_issue(observation):
+                repaired_ids.append(image_id)
+        # When observations are missing or too sparse, keep the provider-selected IDs rather than guessing.
+        if not repaired_ids:
+            repaired_ids = current_ids
+    elif claim_status == "contradicted":
+        for observation in observations:
+            image_id = _observation_image_id(observation)
+            if image_id and _observation_supports_contradiction(observation, issue_type, risk_flags):
+                repaired_ids.append(image_id)
+        if not repaired_ids:
+            repaired_ids = current_ids
+        if not repaired_ids and valid_image:
+            repaired_ids = _split_ids(_ids_from_observations(raw_decision, available_image_ids))
+
+    repaired = _ordered_valid_ids(repaired_ids, available_image_ids)
+    if repaired == "none" and claim_status == "contradicted" and valid_image and len(available_image_ids) == 1:
+        repaired = available_image_ids[0]
+    _append_repair(repairs, "supporting_image_ids", supporting_image_ids, repaired, "direct_decision_evidence_images")
+    return repaired
 
 
 def _strip_flag_tokens(text: str) -> str:
@@ -162,14 +263,12 @@ def _repair_issue_type(
         return "unknown"
 
     if object_part == "side_mirror" and issue_type not in {"none", "unknown"}:
-        # The challenge samples treat damaged side mirrors as broken_part rather than glass_shatter/scratch.
         return "broken_part"
 
     if claim_object == "laptop" and object_part == "screen" and issue_type in {"glass_shatter", "broken_part"}:
         return "crack"
 
     if claim_object == "package":
-        # Package label priority matters. Torn/open packaging should not be overwritten by crushed packaging.
         if object_part in {"seal", "box", "package_side", "package_corner"} and _contains_any(evidence_text, TORN_WORDS):
             return "torn_packaging"
         if object_part in {"box", "package_side", "package_corner"} and (
@@ -223,14 +322,10 @@ def _severity_for_issue(issue_type: str, evidence_text: str, claim_status: str) 
 
 
 def _visible_alternate_damage(raw_decision: dict, evidence_text: str) -> bool:
-    observations = raw_decision.get("visual_observations") or raw_decision.get("image_observations")
-    if isinstance(observations, list):
-        for observation in observations:
-            if not isinstance(observation, dict):
-                continue
-            visible_issues = observation.get("visible_issues") or observation.get("visible_damage")
-            if isinstance(visible_issues, list) and any(str(issue).strip() for issue in visible_issues):
-                return True
+    observations = _collect_observations(raw_decision)
+    for observation in observations:
+        if _observation_has_visible_issue(observation):
+            return True
     return _contains_any(evidence_text, VISIBLE_DAMAGE_WORDS)
 
 
@@ -312,15 +407,6 @@ def repair_normalized_decision(
     severity = severity_target
 
     if claim_status == "not_enough_information":
-        if supporting_image_ids != "none":
-            _append_repair(
-                repairs,
-                "supporting_image_ids",
-                supporting_image_ids,
-                "none",
-                "not_enough_information",
-            )
-        supporting_image_ids = "none"
         evidence_standard_met = False
         if issue_type != "unknown":
             _append_repair(repairs, "issue_type", issue_type, "unknown", "not_enough_information")
@@ -328,18 +414,19 @@ def repair_normalized_decision(
         if severity != "unknown":
             _append_repair(repairs, "severity", severity, "unknown", "not_enough_information")
             severity = "unknown"
-    elif claim_status == "contradicted" and supporting_image_ids == "none" and valid_image:
-        repaired_ids = _ids_from_observations(raw_decision, available_image_ids)
-        _append_repair(
-            repairs,
-            "supporting_image_ids",
-            supporting_image_ids,
-            repaired_ids,
-            "contradiction_supported_by_image",
-        )
-        supporting_image_ids = repaired_ids
 
     flags = _cleanup_flags_for_status([flag for flag in flags if flag != "none"], claim_status, issue_type, evidence_text, repairs)
+    supporting_image_ids = _repair_supporting_image_ids(
+        claim_status=claim_status,
+        issue_type=issue_type,
+        risk_flags=flags,
+        supporting_image_ids=supporting_image_ids,
+        available_image_ids=available_image_ids,
+        raw_decision=raw_decision,
+        valid_image=valid_image,
+        repairs=repairs,
+    )
+
     return RepairedDecision(
         issue_type=issue_type,
         object_part=object_part,
