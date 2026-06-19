@@ -89,6 +89,8 @@ class AppConfig:
     reasoning_effort: str = "low"
     reasoning_max_tokens: int = 0
     reasoning_exclude: bool = True
+    ignore_cache: bool = False
+    cache_write_enabled: bool = True
     paths: AppPaths | None = None
 
     @classmethod
@@ -118,6 +120,8 @@ class AppConfig:
             reasoning_effort=os.environ.get("VLM_REASONING_EFFORT", "low").strip().lower(),
             reasoning_max_tokens=int(os.environ.get("VLM_REASONING_MAX_TOKENS", "0")),
             reasoning_exclude=_env_bool("VLM_REASONING_EXCLUDE", True),
+            ignore_cache=_env_bool("EVAL_IGNORE_CACHE", False),
+            cache_write_enabled=_env_bool("CACHE_WRITE_ENABLED", True),
             paths=paths,
         )
 
@@ -140,6 +144,8 @@ class AppConfig:
         backup_max_concurrency: int | None = None,
         prompt_cache_enabled: bool | None = None,
         prompt_cache_retention: str | None = None,
+        ignore_cache: bool | None = None,
+        cache_write_enabled: bool | None = None,
         save_errors: bool | None = None,
     ) -> "AppConfig":
         del save_errors
@@ -174,6 +180,10 @@ class AppConfig:
             prompt_cache_retention=(
                 prompt_cache_retention if prompt_cache_retention is not None else self.prompt_cache_retention
             ).strip(),
+            ignore_cache=ignore_cache if ignore_cache is not None else self.ignore_cache,
+            cache_write_enabled=(
+                cache_write_enabled if cache_write_enabled is not None else self.cache_write_enabled
+            ),
         )
 
 
@@ -199,5 +209,7 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--prompt-cache", dest="prompt_cache_enabled", action="store_true", default=None)
     parser.add_argument("--no-prompt-cache", dest="prompt_cache_enabled", action="store_false")
     parser.add_argument("--prompt-cache-retention", default=None)
+    parser.add_argument("--ignore-cache", action="store_true", default=None)
+    parser.add_argument("--no-cache-write", dest="cache_write_enabled", action="store_false", default=None)
     parser.add_argument("--save-errors", action="store_true")
     return parser

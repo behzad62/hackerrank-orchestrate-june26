@@ -1,68 +1,109 @@
 # Evaluation Report
 
-## Strategy
+## Strategies Compared
 
-- Provider configured: `openrouter`
-- Provider observed in sample run: `openrouter`
-- Model: `minimax/minimax-m3`
-- Fallback allowed: `False`
-- Fallback actually used/no-vision: `False`
-- Fallback honesty: No fresh provider calls were made in this run. Results came from cached provider output, so any visual inspection occurred in the earlier run that populated the cache.
+| Strategy | Provider | Model | Fresh calls | Cache hits | Fallback rows | claim_status | issue_type | object_part | severity | Risk F1 | Image ID F1 | Est. full-test cost |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| openrouter-minimax | openrouter | minimax/minimax-m3 | 20 | 0 | 0 | 0.750 | 0.500 | 0.850 | 0.500 | 0.577 | 0.842 | $0.0953 |
+| openrouter-qwen3.7 | openrouter | qwen/qwen3.7-plus | 20 | 0 | 0 | 0.750 | 0.450 | 0.900 | 0.400 | 0.512 | 0.833 | $0.1079 |
 
-## Metrics
+
+## Final Strategy Used For output.csv
+
+- Strategy name: openrouter-minimax
+- Provider: openrouter
+- Model: minimax/minimax-m3
+- Backup chain: openrouter:minimax/minimax-m3
+- Fallback allowed for final: false
+- Max concurrency: 3
+- RPM limit: 60
+- Prompt cache: enabled
+- Reason selected: Selected by FINAL_STRATEGY/--final-strategy.
+- Final output command: `python code/main.py --env .env --provider openrouter --model minimax/minimax-m3 --no-fallback`
+
+## Final Strategy Sample Metrics
 
 - Rows expected: 20
 - Rows predicted: 20
 - Rows compared: 20
-- Error count: 100
+- Error count: 91
 
 ### High-Value Field Accuracy
 
-- claim_status: 0.700
-- issue_type: 0.450
-- object_part: 0.800
-- evidence_standard_met: 0.750
-- valid_image: 0.750
-- severity: 0.450
+- claim_status: 0.750
+- issue_type: 0.500
+- object_part: 0.850
+- evidence_standard_met: 0.900
+- valid_image: 0.800
+- severity: 0.500
 
 ### All Evaluated Field Accuracy
 
-- evidence_standard_met: 0.750
+- evidence_standard_met: 0.900
 - evidence_standard_met_reason: 0.000
-- risk_flags: 0.500
-- issue_type: 0.450
-- object_part: 0.800
-- claim_status: 0.700
+- risk_flags: 0.450
+- issue_type: 0.500
+- object_part: 0.850
+- claim_status: 0.750
 - claim_status_justification: 0.000
-- supporting_image_ids: 0.600
-- valid_image: 0.750
-- severity: 0.450
+- supporting_image_ids: 0.700
+- valid_image: 0.800
+- severity: 0.500
 
 ### Risk Flags
 
-- Precision: 0.714
+- Precision: 0.577
 - Recall: 0.577
-- F1: 0.638
+- F1: 0.577
 
 ### Supporting Image IDs
 
-- Set precision: 0.812
-- Set recall: 0.684
-- Set F1: 0.743
-- Average Jaccard overlap: 0.650
+- Set precision: 0.842
+- Set recall: 0.842
+- Set F1: 0.842
+- Average Jaccard overlap: 0.800
+
+### Justification Quality
+
+- Evidence reason non-empty rate: 1.000
+- Claim justification non-empty rate: 1.000
+- Claim justification mentions image ID rate: 1.000
+- Average claim justification length: 297.4 chars
+
+## Error Analysis
+
+Top field errors:
+- claim_status_justification: 20
+- evidence_standard_met_reason: 20
+- risk_flags: 11
+- issue_type: 10
+- severity: 10
+- supporting_image_ids: 6
+- claim_status: 5
+- valid_image: 4
+- object_part: 3
+- evidence_standard_met: 2
+
+Examples:
+- Row 1 `evidence_standard_met_reason`: expected `The rear bumper is visible and the dent can be verified from the submitted image.`, predicted `Image img_1 shows the rear of the car from a direct rear angle; the rear bumper and adjacent body panels are clearly visible and the deformation/damage is assessable.`
+- Row 1 `claim_status_justification`: expected `The image clearly shows a dent on the rear bumper and the user history does not add risk.`, predicted `img_1 clearly shows visible deformation and partial detachment of the rear bumper cover, with the lower bumper section hanging and crumpled on the right side; the trunk lid also shows deformation. The rear bumper damage claimed by the customer is visibly present.`
+- Row 2 `evidence_standard_met_reason`: expected `The full front view provides context and the close-up image shows the scratch on the front bumper.`, predicted `Both images show the front of a white car with the front bumper clearly visible from angles suitable for assessing surface marks.`
 
 ## Operational Analysis
 
 Sample set:
 - Rows: 20
 - Images: 29
-- Model calls: 0
-- Primary provider calls: 0
-- Backup provider calls: 0
+- Fresh model calls: 20
+- Cache hits: 0
 - Fallback rows: 0
-- Cache hits: 20
-- Configured max concurrency: 3
-- Rate-limit waits: 0
+- Backup calls: 0
+- Prompt tokens: 74694
+- Completion tokens: 17424
+- Cached/read tokens: 3572
+- Cache write tokens: 0
+- Runtime: 174.14s
+- Average latency per token-baseline call: 25.47s
 
 Backup reasons:
 - none
@@ -71,56 +112,40 @@ Test set:
 - Rows: 44
 - Images: 82
 - Expected model calls: 44
+- Projected input tokens: 164327
+- Projected output tokens: 38333
+- Estimated full-test cost: $0.0953
+- Estimated full-test summed provider latency: 1120.48s
 
-The system uses one multimodal call per claim row when a real VLM provider is configured. Images for the same claim are submitted together so the model can compare overview and close-up evidence.
+Rate limits and operations:
+- Configured max concurrency: 3
+- Configured RPM limit: 60
+- Approximate TPM requirement: 202660 tokens across the projected full test; divide by intended runtime minutes for required TPM.
+- Retry strategy: bounded retries for rate limits, server errors, timeouts, truncated responses, malformed JSON, and temporary network errors.
+- Backup strategy: backup VLM chain is used only for provider/runtime failures, not for valid model judgments.
+- Caching strategy: response cache keys include provider, model, effective prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
 
 Pricing assumptions:
-- Provider pricing varies by selected model.
-- Use provider token accounting from logs/provider metadata when available.
-- Unlisted model input price default: $0.0000 / 1M tokens.
-- Unlisted model output price default: $0.0000 / 1M tokens.
-- Model-specific price assumptions:
-- none observed in this run
-- With `VLM_PROVIDER=none`, images were not inspected and model cost is $0.
-- If fallback is observed during a real-provider run, fallback rows did not receive visual inspection; provider rows may still have token costs.
+- Prices are read from `VLM_MODEL_PRICES` as `provider:model=input,output` in dollars per 1M tokens.
+- Missing provider/model prices are treated as $0 and explicitly warned about below.
+- Model-specific prices:
+- openrouter/minimax/minimax-m3: 20 calls, input $0.3000 / 1M, output $1.2000 / 1M
+- Price warnings:
+- none
 
-Observed token usage:
-- Observed prompt tokens: 0
-- Observed output tokens: 0
-- Observed prompt cache write tokens: 0
-- Observed prompt cache read tokens: 0
-- Observed prompt cache hit ratio: 0.000
-- Observed average prompt tokens per fresh call: 0.0
-- Observed average output tokens per fresh call: 0.0
+## Caching Notes
 
-Estimated full-test token usage and cost:
-- Projected input tokens: unavailable (sample run had no fresh provider calls)
-- Projected output tokens: unavailable (sample run had no fresh provider calls)
-- Estimated full-test cost: unavailable (sample run had no fresh token baseline)
+- Token source: fresh provider metadata
+- Prompt cache enabled: true
+- Response cache ignore mode: true
+- Response cache write enabled: true
+- If token source is approximate prompt-size estimate, input tokens are estimated from prompt characters and output tokens use the configured max-output budget as a conservative bound.
+- Image token usage: provider-specific or unavailable unless provider metadata includes it in prompt token accounting.
 
-Latency/runtime estimate:
-- Observed total provider latency: unavailable (sample run had no fresh provider calls)
-- Observed total run runtime: 0.16s
-- Observed average latency per fresh call: unavailable (sample run had no fresh provider calls)
-- Estimated full-test summed provider latency at current settings: unavailable (sample run had no fresh latency baseline)
+## Known Limitations
 
-Runtime and rate limits:
-- Calls use bounded parallel execution with up to 3 in-flight provider requests.
-- RPM consideration: local parallelism can increase burst pressure; the configured RPM limiter, retry backoff, and provider latency bound request rate.
-- TPM consideration: projected token volume is unavailable because the sample run had no fresh provider calls; run one uncached sample pass or use provider pricing/token metadata before final cost planning.
-- Retry policy uses bounded retries for rate limits, server errors, timeouts, truncated responses, and JSON parse errors.
-- Cache keys include provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version.
-
-Caching and batching:
-- Successful provider responses are cached by stable content hash.
-- Fallback results after provider errors are not cached as successful model evidence.
-- Rows are not batched across claims; image sets are grouped per claim.
-
-Known limitations:
 - No-vision fallback is intentionally conservative and should not be used for final predictions unless explicitly allowed.
-- Fallback output does not inspect image content and therefore reports `not_enough_information`.
+- Fallback output does not inspect image content and reports `not_enough_information`.
 - AVIF images require a local decoder through `pillow-avif-plugin`; unsupported conversion marks the image unreadable.
 - Text found in images is treated as untrusted and can add `text_instruction_present`.
-
-Failure modes observed in logs:
-- Review `logs/run.jsonl` for provider error categories, retry counts, cache hits, and normalization repairs.
+- Free-text justification exact-match scores are kept in all-field metrics, but justification quality is reported separately because exact text does not need to match sample wording.

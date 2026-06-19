@@ -25,6 +25,8 @@ def main() -> int:
         backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
+        ignore_cache=args.ignore_cache,
+        cache_write_enabled=args.cache_write_enabled,
     )
     if cfg.paths is None:
         raise ValueError("AppConfig.paths is required")
