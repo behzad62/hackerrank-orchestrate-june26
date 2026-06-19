@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import requests
 
 from providers.anthropic import AnthropicProvider
 from providers.openai_compatible import OpenAICompatibleProvider, categorize_http_error, extract_json_object
@@ -59,7 +60,13 @@ def test_categorize_http_error():
     assert categorize_http_error(401, "bad key") == "auth_error"
     assert categorize_http_error(402, "credits") == "insufficient_credit"
     assert categorize_http_error(429, "slow down") == "rate_limited"
+    assert categorize_http_error(408, "request timed out") == "timeout"
+    assert categorize_http_error(413, "too large") == "context_length_exceeded"
+    assert categorize_http_error(400, "context length exceeded") == "context_length_exceeded"
+    assert categorize_http_error(400, "token limit exceeded") == "context_length_exceeded"
+    assert categorize_http_error(400, "unsupported image format") == "unsupported_image"
     assert categorize_http_error(400, "invalid image") == "bad_request"
+    assert categorize_http_error(529, "overloaded") == "server_error"
     assert categorize_http_error(500, "server") == "server_error"
     assert categorize_http_error(418, "teapot") == "unknown_provider_error"
 
@@ -156,6 +163,114 @@ def test_openai_compatible_returns_error_metadata(monkeypatch):
     assert result.metadata.error_category == "rate_limited"
 
 
+def test_openai_compatible_returns_timeout_metadata(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        raise requests.exceptions.Timeout("timed out")
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "timeout"
+
+
+def test_openai_compatible_returns_network_error_metadata(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        raise requests.exceptions.RequestException("network down")
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "network_error"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{"finish_reason": "stop", "message": {}}]},
+        {"choices": [{"finish_reason": "stop", "message": {"content": "not json"}}]},
+    ],
+)
+def test_openai_compatible_returns_json_parse_error_for_malformed_payload(monkeypatch, payload):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(payload=payload)
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+
+
+def test_openai_compatible_returns_json_parse_error_for_invalid_response_json(monkeypatch):
+    class BadJsonResponse(FakeResponse):
+        def json(self):
+            raise ValueError("invalid response json")
+
+    def fake_post(url, headers, json, timeout):
+        return BadJsonResponse(text="<html>not json</html>")
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+
+
+def test_openai_compatible_marks_length_finish_reason_as_truncated(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"decision":{"claim_status":"supported"}}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.metadata.finish_reason == "length"
+    assert result.metadata.error_category == "response_truncated"
+
+
 def test_anthropic_packages_image_blocks(monkeypatch):
     captured = {}
 
@@ -205,3 +320,82 @@ def test_anthropic_returns_error_metadata(monkeypatch):
     assert result.raw_json == {"decision": {}}
     assert result.metadata.http_status == 402
     assert result.metadata.error_category == "insufficient_credit"
+
+
+def test_anthropic_returns_timeout_metadata(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        raise requests.exceptions.Timeout("timed out")
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "timeout"
+
+
+def test_anthropic_returns_network_error_metadata(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        raise requests.exceptions.RequestException("network down")
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "network_error"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"content": []},
+        {"content": [{"type": "tool_use", "input": {}}]},
+        {"content": [{"type": "text", "text": "not json"}]},
+    ],
+)
+def test_anthropic_returns_json_parse_error_for_malformed_payload(monkeypatch, payload):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(payload=payload)
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+
+
+def test_anthropic_returns_json_parse_error_for_invalid_response_json(monkeypatch):
+    class BadJsonResponse(FakeResponse):
+        def json(self):
+            raise ValueError("invalid response json")
+
+    def fake_post(url, headers, json, timeout):
+        return BadJsonResponse(text="<html>not json</html>")
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+
+
+def test_anthropic_marks_max_tokens_stop_reason_as_truncated(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "max_tokens",
+                "content": [{"type": "text", "text": '{"decision":{"claim_status":"supported"}}'}],
+                "usage": {"input_tokens": 12, "output_tokens": 6},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.metadata.finish_reason == "max_tokens"
+    assert result.metadata.error_category == "response_truncated"

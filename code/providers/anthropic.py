@@ -44,43 +44,90 @@ class AnthropicProvider:
             )
         return content
 
+    def _error_result(
+        self,
+        *,
+        category: str,
+        latency_ms: int,
+        http_status: int = 0,
+        finish_reason: str = "",
+        request_id: str = "",
+    ) -> ProviderResult:
+        return ProviderResult(
+            raw_json={"decision": {}},
+            metadata=ProviderMetadata(
+                provider=self.name,
+                model=self.model,
+                latency_ms=latency_ms,
+                finish_reason=finish_reason,
+                request_id=request_id,
+                http_status=http_status,
+                error_category=category,
+            ),
+        )
+
     def review_claim(self, context: PredictionContext) -> ProviderResult:
         started = time.monotonic()
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "max_tokens": self.max_output_tokens,
-                "temperature": self.temperature,
-                "messages": [{"role": "user", "content": self._content(context)}],
-            },
-            timeout=self.timeout_seconds,
-        )
+        try:
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": self.max_output_tokens,
+                    "temperature": self.temperature,
+                    "messages": [{"role": "user", "content": self._content(context)}],
+                },
+                timeout=self.timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="timeout", latency_ms=duration_ms)
+        except requests.exceptions.RequestException:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="network_error", latency_ms=duration_ms)
+
         duration_ms = int((time.monotonic() - started) * 1000)
         if response.status_code >= 400:
-            return ProviderResult(
-                raw_json={"decision": {}},
-                metadata=ProviderMetadata(
-                    provider=self.name,
-                    model=self.model,
-                    latency_ms=duration_ms,
-                    http_status=response.status_code,
-                    error_category=categorize_http_error(response.status_code, response.text),
-                ),
+            return self._error_result(
+                category=categorize_http_error(response.status_code, response.text),
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                request_id=response.headers.get("request-id", ""),
             )
 
-        data = response.json()
-        text = "\n".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
-        usage = data.get("usage", {})
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
+        try:
+            data = response.json()
+            content = data.get("content")
+            if not isinstance(content, list) or not content:
+                raise ValueError("missing content")
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            ]
+            if not text_parts:
+                raise ValueError("missing text content")
+            usage = data.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            stop_reason = str(data.get("stop_reason") or "")
+            parsed = extract_json_object("\n".join(text_parts))
+        except (ValueError, TypeError):
+            return self._error_result(
+                category="json_parse_error",
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                request_id=response.headers.get("request-id", ""),
+            )
         return ProviderResult(
-            raw_json=extract_json_object(text),
+            raw_json=parsed,
             metadata=ProviderMetadata(
                 provider=self.name,
                 model=self.model,
@@ -88,8 +135,9 @@ class AnthropicProvider:
                 prompt_tokens=input_tokens,
                 completion_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
-                finish_reason=str(data.get("stop_reason") or ""),
+                finish_reason=stop_reason,
                 request_id=response.headers.get("request-id", ""),
                 http_status=response.status_code,
+                error_category="response_truncated" if stop_reason == "max_tokens" else "",
             ),
         )

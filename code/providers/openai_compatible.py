@@ -16,11 +16,17 @@ def categorize_http_error(status_code: int, text: str) -> str:
         return "auth_error"
     if status_code == 402 or "credit" in lowered or "quota" in lowered:
         return "insufficient_credit"
+    if status_code == 408:
+        return "timeout"
     if status_code == 429:
         return "rate_limited"
+    if status_code == 413 or "context length" in lowered or "token limit" in lowered:
+        return "context_length_exceeded"
+    if "unsupported image" in lowered or "unsupported_image" in lowered:
+        return "unsupported_image"
     if status_code in {400, 415}:
         return "bad_request"
-    if status_code in {500, 502, 503, 504}:
+    if status_code in {500, 502, 503, 504, 529}:
         return "server_error"
     return "unknown_provider_error"
 
@@ -89,6 +95,51 @@ class OpenAICompatibleProvider:
             )
         return content
 
+    def _error_result(
+        self,
+        *,
+        category: str,
+        latency_ms: int,
+        http_status: int = 0,
+        finish_reason: str = "",
+        request_id: str = "",
+    ) -> ProviderResult:
+        return ProviderResult(
+            raw_json={"decision": {}},
+            metadata=ProviderMetadata(
+                provider=self.name,
+                model=self.model,
+                latency_ms=latency_ms,
+                finish_reason=finish_reason,
+                request_id=request_id,
+                http_status=http_status,
+                error_category=category,
+            ),
+        )
+
+    def _metadata(
+        self,
+        *,
+        latency_ms: int,
+        http_status: int,
+        response: requests.Response,
+        choice: dict[str, Any],
+        usage: dict[str, Any],
+    ) -> ProviderMetadata:
+        finish_reason = str(choice.get("finish_reason") or "")
+        return ProviderMetadata(
+            provider=self.name,
+            model=self.model,
+            latency_ms=latency_ms,
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+            total_tokens=int(usage.get("total_tokens") or 0),
+            finish_reason=finish_reason,
+            request_id=response.headers.get("x-request-id", ""),
+            http_status=http_status,
+            error_category="response_truncated" if finish_reason == "length" else "",
+        )
+
     def review_claim(self, context: PredictionContext) -> ProviderResult:
         started = time.monotonic()
         payload = {
@@ -98,40 +149,59 @@ class OpenAICompatibleProvider:
             "response_format": {"type": "json_object"},
             "messages": [{"role": "user", "content": self._content(context)}],
         }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout_seconds,
-        )
+        try:
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="timeout", latency_ms=duration_ms)
+        except requests.exceptions.RequestException:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            return self._error_result(category="network_error", latency_ms=duration_ms)
+
         duration_ms = int((time.monotonic() - started) * 1000)
         if response.status_code >= 400:
-            return ProviderResult(
-                raw_json={"decision": {}},
-                metadata=ProviderMetadata(
-                    provider=self.name,
-                    model=self.model,
-                    latency_ms=duration_ms,
-                    http_status=response.status_code,
-                    error_category=categorize_http_error(response.status_code, response.text),
-                ),
+            return self._error_result(
+                category=categorize_http_error(response.status_code, response.text),
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                request_id=response.headers.get("x-request-id", ""),
             )
 
-        data = response.json()
-        choice = data.get("choices", [{}])[0]
-        content = choice.get("message", {}).get("content", "")
-        usage = data.get("usage", {})
-        return ProviderResult(
-            raw_json=extract_json_object(content),
-            metadata=ProviderMetadata(
-                provider=self.name,
-                model=self.model,
+        try:
+            data = response.json()
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("missing choices")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise ValueError("invalid choice")
+            message = choice.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                raise ValueError("missing message content")
+            usage = data.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
+            parsed = extract_json_object(message["content"])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return self._error_result(
+                category="json_parse_error",
                 latency_ms=duration_ms,
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-                finish_reason=str(choice.get("finish_reason") or ""),
-                request_id=response.headers.get("x-request-id", ""),
                 http_status=response.status_code,
+                request_id=response.headers.get("x-request-id", ""),
+            )
+
+        return ProviderResult(
+            raw_json=parsed,
+            metadata=self._metadata(
+                latency_ms=duration_ms,
+                http_status=response.status_code,
+                response=response,
+                choice=choice,
+                usage=usage,
             ),
         )
