@@ -259,7 +259,7 @@ def main() -> int:
     run_summary = _latest_run_provider_summary(paths.logs_dir / "run.jsonl")
     observed_provider = str(run_summary["observed_provider"])
     sample_model_calls = int(run_summary["model_calls"])
-    test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} and sample_model_calls else 0
+    test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} else 0
     _write_report(
         report_path,
         metrics,

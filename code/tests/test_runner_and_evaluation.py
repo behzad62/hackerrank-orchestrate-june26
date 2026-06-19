@@ -826,6 +826,39 @@ def test_evaluation_report_describes_cache_only_provider_runs(tmp_path):
     assert "A configured VLM provider was used for image inspection." not in report
 
 
+def test_evaluation_report_estimates_test_calls_after_cache_only_sample(tmp_path):
+    report_path = tmp_path / "evaluation_report.md"
+    metrics = {
+        "rows_expected": 1,
+        "rows_predicted": 1,
+        "rows_compared": 1,
+        "error_count": 0,
+        "field_accuracy": {"claim_status": 1.0},
+        "risk_flag_scores": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    }
+
+    _write_report(
+        report_path,
+        metrics,
+        sample_rows=[{"image_paths": "images/sample/case_001/img_1.jpg"}],
+        test_rows=[
+            {"image_paths": "images/test/case_001/img_1.jpg"},
+            {"image_paths": "images/test/case_002/img_1.jpg"},
+        ],
+        provider="openai",
+        model="vision-model",
+        observed_provider="openai",
+        fallback_allowed=False,
+        fallback_used=False,
+        sample_model_calls=0,
+        test_model_calls=2,
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "No fresh provider calls were made in this run" in report
+    assert "Expected model calls: 2" in report
+
+
 def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):
     write_task7_minimal_dataset(tmp_path)
     env = {
