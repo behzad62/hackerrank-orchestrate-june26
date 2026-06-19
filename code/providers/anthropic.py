@@ -5,9 +5,18 @@ from typing import Any
 
 import requests
 
-from providers.openai_compatible import categorize_http_error, extract_json_object
+from providers.openai_compatible import _safe_token_count, categorize_http_error, extract_json_object
 from prompting import build_text_prompt
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
+
+
+def _normalize_anthropic_usage(usage: Any) -> tuple[int, int]:
+    if not isinstance(usage, dict):
+        usage = {}
+    return (
+        _safe_token_count(usage.get("input_tokens")),
+        _safe_token_count(usage.get("output_tokens")),
+    )
 
 
 class AnthropicProvider:
@@ -113,11 +122,7 @@ class AnthropicProvider:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
-            usage = data.get("usage", {})
-            if not isinstance(usage, dict):
-                usage = {}
-            input_tokens = int(usage.get("input_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or 0)
+            input_tokens, output_tokens = _normalize_anthropic_usage(data.get("usage"))
             stop_reason = str(data.get("stop_reason") or "")
             if stop_reason == "max_tokens":
                 return self._error_result(

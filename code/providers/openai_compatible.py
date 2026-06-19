@@ -53,6 +53,23 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise json.JSONDecodeError("No JSON object found", stripped, 0)
 
 
+def _safe_token_count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_openai_usage(usage: Any) -> tuple[int, int, int]:
+    if not isinstance(usage, dict):
+        usage = {}
+    return (
+        _safe_token_count(usage.get("prompt_tokens")),
+        _safe_token_count(usage.get("completion_tokens")),
+        _safe_token_count(usage.get("total_tokens")),
+    )
+
+
 class OpenAICompatibleProvider:
     def __init__(
         self,
@@ -130,16 +147,18 @@ class OpenAICompatibleProvider:
         http_status: int,
         response: requests.Response,
         choice: dict[str, Any],
-        usage: dict[str, Any],
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
     ) -> ProviderMetadata:
         finish_reason = str(choice.get("finish_reason") or "")
         return ProviderMetadata(
             provider=self.name,
             model=self.model,
             latency_ms=latency_ms,
-            prompt_tokens=int(usage.get("prompt_tokens") or 0),
-            completion_tokens=int(usage.get("completion_tokens") or 0),
-            total_tokens=int(usage.get("total_tokens") or 0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
             finish_reason=finish_reason,
             request_id=response.headers.get("x-request-id", ""),
             http_status=http_status,
@@ -178,15 +197,15 @@ class OpenAICompatibleProvider:
                 request_id=response.headers.get("x-request-id", ""),
             )
 
-        usage: dict[str, Any] = {}
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
         finish_reason = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response JSON is not an object")
-            usage = data.get("usage", {})
-            if not isinstance(usage, dict):
-                usage = {}
+            prompt_tokens, completion_tokens, total_tokens = _normalize_openai_usage(data.get("usage"))
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices:
                 raise ValueError("missing choices")
@@ -201,9 +220,9 @@ class OpenAICompatibleProvider:
                     http_status=response.status_code,
                     finish_reason=finish_reason,
                     request_id=response.headers.get("x-request-id", ""),
-                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                    completion_tokens=int(usage.get("completion_tokens") or 0),
-                    total_tokens=int(usage.get("total_tokens") or 0),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
                 )
             message = choice.get("message")
             if not isinstance(message, dict) or not isinstance(message.get("content"), str):
@@ -216,9 +235,9 @@ class OpenAICompatibleProvider:
                 http_status=response.status_code,
                 finish_reason=finish_reason,
                 request_id=response.headers.get("x-request-id", ""),
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
             )
 
         return ProviderResult(
@@ -228,6 +247,8 @@ class OpenAICompatibleProvider:
                 http_status=response.status_code,
                 response=response,
                 choice=choice,
-                usage=usage,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
             ),
         )

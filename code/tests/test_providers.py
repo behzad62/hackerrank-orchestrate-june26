@@ -280,6 +280,66 @@ def test_openai_compatible_preserves_metadata_for_parse_invalid_model_json(monke
     assert result.metadata.total_tokens == 15
 
 
+def test_openai_compatible_defaults_malformed_usage_for_parse_error(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "not json"},
+                    }
+                ],
+                "usage": {"prompt_tokens": "bad", "completion_tokens": [], "total_tokens": {}},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+    assert result.metadata.finish_reason == "stop"
+    assert result.metadata.prompt_tokens == 0
+    assert result.metadata.completion_tokens == 0
+    assert result.metadata.total_tokens == 0
+
+
+def test_openai_compatible_defaults_malformed_usage_for_success(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"decision":{"claim_status":"supported"}}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": "bad", "completion_tokens": [], "total_tokens": {}},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="sk-test",
+        model="model",
+        base_url="https://api.openai.com/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json["decision"]["claim_status"] == "supported"
+    assert result.metadata.prompt_tokens == 0
+    assert result.metadata.completion_tokens == 0
+    assert result.metadata.total_tokens == 0
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -498,6 +558,48 @@ def test_anthropic_preserves_metadata_for_parse_invalid_model_json(monkeypatch):
     assert result.metadata.prompt_tokens == 12
     assert result.metadata.completion_tokens == 6
     assert result.metadata.total_tokens == 18
+
+
+def test_anthropic_defaults_malformed_usage_for_parse_error(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "not json"}],
+                "usage": {"input_tokens": "bad", "output_tokens": []},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.error_category == "json_parse_error"
+    assert result.metadata.finish_reason == "end_turn"
+    assert result.metadata.prompt_tokens == 0
+    assert result.metadata.completion_tokens == 0
+    assert result.metadata.total_tokens == 0
+
+
+def test_anthropic_defaults_malformed_usage_for_success(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": '{"decision":{"claim_status":"supported"}}'}],
+                "usage": {"input_tokens": "bad", "output_tokens": []},
+            }
+        )
+
+    monkeypatch.setattr("providers.anthropic.requests.post", fake_post)
+    provider = AnthropicProvider(api_key="sk-ant-test", model="model")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json["decision"]["claim_status"] == "supported"
+    assert result.metadata.prompt_tokens == 0
+    assert result.metadata.completion_tokens == 0
+    assert result.metadata.total_tokens == 0
 
 
 @pytest.mark.parametrize("content", [[], [{"type": "tool_use", "input": {}}]])
