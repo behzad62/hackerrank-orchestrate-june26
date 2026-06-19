@@ -7,7 +7,7 @@
 - Fallback allowed: `false`
 - Initial output limit tested: `1800`
 - Viable output limit for row 2 smoke test: `4096`
-- Implemented follow-up setting: `GEMINI_THINKING_LEVEL=low`
+- Implemented follow-up setting: `VLM_REASONING_ENABLED=true`, `VLM_REASONING_EFFORT=low`
 - Implemented follow-up retry cap: `VLM_RETRY_MAX_SLEEP_SECONDS=45`
 
 ## Result
@@ -62,7 +62,7 @@ Prompt caching is working at the provider telemetry level when Gemini accepts ca
 
 The prompt contract is relatively verbose because it asks for `claim_intent`, `visual_observations`, and `decision`. Only `decision` is required by normalization. If Gemini remains truncation-prone or expensive, the next prompt improvement should be an optional decision-only provider contract while preserving the final CSV schema.
 
-The code now exposes `GEMINI_THINKING_LEVEL` through env config. Google recommends `thinking_level` for Gemini 3.x, and lower values such as `low` or `minimal` are the right next lever for reducing output tokens, latency, and truncation risk.
+The code now exposes global reasoning controls through env config. Google recommends `thinking_level` for Gemini 3.x, and lower values such as `low` or `minimal` are the right next lever for reducing output tokens, latency, and truncation risk.
 
 The retry cap is now configurable with `VLM_RETRY_MAX_SLEEP_SECONDS`. The latest run used sleeps of `1,2,4,8,16,32` seconds before failing on persistent quota exhaustion.
 

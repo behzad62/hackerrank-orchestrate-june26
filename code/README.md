@@ -33,10 +33,11 @@ VLM_MAX_OUTPUT_TOKENS=1800
 VLM_CACHE_DIR=.cache/vlm
 PROMPT_CACHE_ENABLED=true
 PROMPT_CACHE_RETENTION=24h
-GEMINI_THINKING_LEVEL=medium
+VLM_REASONING_ENABLED=false
+VLM_REASONING_EFFORT=low
+VLM_REASONING_MAX_TOKENS=0
+VLM_REASONING_EXCLUDE=true
 ALLOW_NO_VISION_FALLBACK=false
-VLM_INPUT_PRICE_PER_MILLION=0
-VLM_OUTPUT_PRICE_PER_MILLION=0
 VLM_MODEL_PRICES=openrouter:qwen/qwen3.7-plus=0.32,1.28;gemini:gemini-3.5-flash=1.50,9.00
 ```
 
@@ -44,7 +45,9 @@ VLM_MODEL_PRICES=openrouter:qwen/qwen3.7-plus=0.32,1.28;gemini:gemini-3.5-flash=
 
 `VLM_BACKUP_CHAIN` is only used when `ALLOW_BACKUP_VLM=true`. Backup VLMs are reliability fallbacks for provider/runtime failures such as exhausted quota, rate limits after retries, timeouts, server errors, truncated responses, malformed JSON, or temporary network errors. They are not used when the primary model returns a valid prediction such as `contradicted` or `not_enough_information`.
 
-`VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. The single `VLM_INPUT_PRICE_PER_MILLION` and `VLM_OUTPUT_PRICE_PER_MILLION` values remain the default when a provider/model is not listed.
+`VLM_REASONING_ENABLED` enables provider reasoning controls when the selected model supports them. `VLM_REASONING_EFFORT` accepts OpenRouter-style levels such as `minimal`, `low`, `medium`, `high`, `xhigh`, and `none`; native Gemini maps this to `thinkingLevel`. `VLM_REASONING_EXCLUDE=true` asks compatible providers not to return reasoning text in the response, which keeps JSON extraction cleaner.
+
+`VLM_MODEL_PRICES` uses semicolon-separated `provider:model=input,output` entries, with prices in dollars per 1M tokens. Unlisted provider/model pairs are treated as `$0` in evaluation cost estimates until explicitly configured.
 
 ## Run Final Predictions
 
@@ -78,7 +81,7 @@ Outputs:
 
 Logs are written under `logs/` as JSONL and never include API keys, raw image bytes, or base64 payloads.
 
-Cache files are written under `.cache/vlm/` by default and are keyed by provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version. Generation settings that can change predictions, including max output tokens and Gemini thinking level, are included in the effective cache key.
+Cache files are written under `.cache/vlm/` by default and are keyed by provider, model, prompt version, row content, user history, evidence requirements, image hashes, and normalizer version. Generation settings that can change predictions, including max output tokens and reasoning controls, are included in the effective cache key.
 
 Provider prompt caching is enabled by default when supported. The prompt is ordered with stable instructions, allowed values, output schema, evidence requirements, injection policy, and examples first; per-claim user history, claim text, image IDs, image payloads, and image metadata follow after that. Provider response logs include cache telemetry when returned by the API, including cached tokens, cache hit ratio, retention, and Anthropic cache creation/read tokens.
 

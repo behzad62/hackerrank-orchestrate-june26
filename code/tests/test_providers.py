@@ -202,6 +202,37 @@ def test_openrouter_headers_are_included(monkeypatch):
     assert "max_tokens" not in captured["json"]
 
 
+def test_openrouter_sends_unified_reasoning_config(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse(
+            payload={
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openrouter",
+        api_key="sk-test",
+        model="qwen/qwen3.7-plus",
+        base_url="https://openrouter.ai/api/v1",
+        reasoning_enabled=True,
+        reasoning_effort="low",
+        reasoning_exclude=True,
+    )
+    provider.review_claim(sample_context())
+
+    assert captured["json"]["reasoning"] == {
+        "enabled": True,
+        "effort": "low",
+        "exclude": True,
+    }
+
+
 def test_openrouter_uses_system_cache_breakpoint_and_dynamic_user_content(monkeypatch):
     captured = {}
 
@@ -900,7 +931,13 @@ def test_gemini_packages_inline_images_and_static_system_instruction(monkeypatch
         )
 
     monkeypatch.setattr("providers.gemini.requests.post", fake_post)
-    provider = GeminiProvider(api_key="gemini-test", model="gemini-3.5-flash", max_output_tokens=1800)
+    provider = GeminiProvider(
+        api_key="gemini-test",
+        model="gemini-3.5-flash",
+        max_output_tokens=1800,
+        reasoning_enabled=True,
+        reasoning_effort="low",
+    )
     result = provider.review_claim(sample_context())
 
     assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
@@ -913,7 +950,7 @@ def test_gemini_packages_inline_images_and_static_system_instruction(monkeypatch
     assert captured["json"]["generationConfig"] == {
         "maxOutputTokens": 1800,
         "responseMimeType": "application/json",
-        "thinkingConfig": {"thinkingLevel": "medium"},
+        "thinkingConfig": {"thinkingLevel": "low"},
     }
     assert result.raw_json["decision"]["claim_status"] == "supported"
     assert result.metadata.prompt_tokens == 90

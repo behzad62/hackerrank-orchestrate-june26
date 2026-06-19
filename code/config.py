@@ -82,7 +82,10 @@ class AppConfig:
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
     prompt_version: str = "claim-review-v2-openrouter-cache"
-    gemini_thinking_level: str = "medium"
+    reasoning_enabled: bool = False
+    reasoning_effort: str = "low"
+    reasoning_max_tokens: int = 0
+    reasoning_exclude: bool = True
     paths: AppPaths | None = None
 
     @classmethod
@@ -105,7 +108,10 @@ class AppConfig:
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
             prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
             prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),
-            gemini_thinking_level=os.environ.get("GEMINI_THINKING_LEVEL", "medium").strip().lower(),
+            reasoning_enabled=_env_bool("VLM_REASONING_ENABLED", False),
+            reasoning_effort=os.environ.get("VLM_REASONING_EFFORT", "low").strip().lower(),
+            reasoning_max_tokens=int(os.environ.get("VLM_REASONING_MAX_TOKENS", "0")),
+            reasoning_exclude=_env_bool("VLM_REASONING_EXCLUDE", True),
             paths=paths,
         )
 

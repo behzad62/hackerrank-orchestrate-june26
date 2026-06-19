@@ -66,6 +66,10 @@ def build_provider_for_spec(cfg: AppConfig, spec: ProviderSpec | tuple[str, str]
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,
             prompt_cache_retention=cfg.prompt_cache_retention,
+            reasoning_enabled=cfg.reasoning_enabled,
+            reasoning_effort=cfg.reasoning_effort,
+            reasoning_max_tokens=cfg.reasoning_max_tokens,
+            reasoning_exclude=cfg.reasoning_exclude,
         )
     if provider == "openrouter":
         key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -83,6 +87,10 @@ def build_provider_for_spec(cfg: AppConfig, spec: ProviderSpec | tuple[str, str]
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,
             prompt_cache_retention=cfg.prompt_cache_retention,
+            reasoning_enabled=cfg.reasoning_enabled,
+            reasoning_effort=cfg.reasoning_effort,
+            reasoning_max_tokens=cfg.reasoning_max_tokens,
+            reasoning_exclude=cfg.reasoning_exclude,
         )
     if provider == "anthropic":
         key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -112,7 +120,8 @@ def build_provider_for_spec(cfg: AppConfig, spec: ProviderSpec | tuple[str, str]
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,
             prompt_cache_retention=cfg.prompt_cache_retention,
-            thinking_level=cfg.gemini_thinking_level,
+            reasoning_enabled=cfg.reasoning_enabled,
+            reasoning_effort=cfg.reasoning_effort,
         )
     raise ValueError(f"Unsupported provider: {provider}")
 
@@ -154,7 +163,10 @@ def _effective_prompt_version(cfg: AppConfig) -> str:
         "temperature": cfg.temperature,
         "max_output_tokens": cfg.max_output_tokens,
         "provider": cfg.provider,
-        "gemini_thinking_level": cfg.gemini_thinking_level if cfg.provider == "gemini" else "",
+        "reasoning_enabled": cfg.reasoning_enabled,
+        "reasoning_effort": cfg.reasoning_effort,
+        "reasoning_max_tokens": cfg.reasoning_max_tokens,
+        "reasoning_exclude": cfg.reasoning_exclude,
     }
     return "|".join(f"{key}={value}" for key, value in generation_settings.items())
 
@@ -446,7 +458,10 @@ def run_predictions(
         prompt_cache_retention=cfg.prompt_cache_retention,
         output_limit=cfg.max_output_tokens,
         retry_max_sleep_seconds=cfg.retry_max_sleep_seconds,
-        gemini_thinking_level=cfg.gemini_thinking_level if cfg.provider == "gemini" else "",
+        reasoning_enabled=cfg.reasoning_enabled,
+        reasoning_effort=cfg.reasoning_effort,
+        reasoning_max_tokens=cfg.reasoning_max_tokens,
+        reasoning_exclude=cfg.reasoning_exclude,
     )
 
     for row_index, row in enumerate(claim_rows, start=1):

@@ -225,20 +225,22 @@ def test_build_provider_none(tmp_path):
     assert provider.name == "none"
 
 
-def test_build_provider_passes_gemini_thinking_level(monkeypatch, tmp_path):
+def test_build_provider_passes_global_reasoning_to_gemini(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     paths = AppPaths.from_repo_root(tmp_path)
     cfg = AppConfig(
         provider="gemini",
         model="gemini-3.5-flash",
-        gemini_thinking_level="low",
+        reasoning_enabled=True,
+        reasoning_effort="low",
         paths=paths,
     )
 
     provider = build_provider(cfg)
 
     assert provider.name == "gemini"
-    assert provider.thinking_level == "low"
+    assert provider.reasoning_enabled is True
+    assert provider.reasoning_effort == "low"
 
 
 def test_sleep_seconds_uses_configurable_cap():
@@ -254,20 +256,23 @@ def test_effective_prompt_version_includes_generation_settings(tmp_path):
         provider="gemini",
         model="gemini-3.5-flash",
         max_output_tokens=4096,
-        gemini_thinking_level="low",
+        reasoning_enabled=True,
+        reasoning_effort="low",
         paths=paths,
     )
     medium = AppConfig(
         provider="gemini",
         model="gemini-3.5-flash",
         max_output_tokens=4096,
-        gemini_thinking_level="medium",
+        reasoning_enabled=True,
+        reasoning_effort="medium",
         paths=paths,
     )
 
     assert _effective_prompt_version(low) != _effective_prompt_version(medium)
     assert "max_output_tokens=4096" in _effective_prompt_version(low)
-    assert "gemini_thinking_level=low" in _effective_prompt_version(low)
+    assert "reasoning_enabled=True" in _effective_prompt_version(low)
+    assert "reasoning_effort=low" in _effective_prompt_version(low)
 
 
 @pytest.mark.parametrize(

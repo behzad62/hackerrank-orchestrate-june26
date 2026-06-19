@@ -49,7 +49,9 @@ For the next Gemini attempt, use:
 - `VLM_PROVIDER=gemini`
 - `VLM_MODEL=gemini-3.5-flash`
 - `VLM_MAX_OUTPUT_TOKENS=4096`
-- `GEMINI_THINKING_LEVEL=low`
+- `VLM_REASONING_ENABLED=true`
+- `VLM_REASONING_EFFORT=low`
+- `VLM_REASONING_EXCLUDE=true`
 - `VLM_MAX_RETRIES=6`
 - `VLM_RETRY_MAX_SLEEP_SECONDS=45`
 - a fresh `VLM_CACHE_DIR` for any apples-to-apples rerun

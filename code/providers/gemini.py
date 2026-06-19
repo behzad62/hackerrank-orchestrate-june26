@@ -52,7 +52,8 @@ class GeminiProvider:
         max_output_tokens: int = 1800,
         prompt_cache_enabled: bool = True,
         prompt_cache_retention: str = "implicit",
-        thinking_level: str = "medium",
+        reasoning_enabled: bool = False,
+        reasoning_effort: str = "low",
     ):
         self.api_key = api_key
         self.model = model
@@ -60,7 +61,8 @@ class GeminiProvider:
         self.max_output_tokens = max_output_tokens
         self.prompt_cache_enabled = prompt_cache_enabled
         self.prompt_cache_retention = prompt_cache_retention
-        self.thinking_level = thinking_level
+        self.reasoning_enabled = reasoning_enabled
+        self.reasoning_effort = reasoning_effort.strip().lower()
 
     def _url(self) -> str:
         return f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
@@ -86,14 +88,18 @@ class GeminiProvider:
 
     def _payload(self, context: PredictionContext) -> dict[str, Any]:
         prompt_parts = build_prompt_parts(context)
+        generation_config: dict[str, Any] = {
+            "maxOutputTokens": self.max_output_tokens,
+            "responseMimeType": "application/json",
+        }
+        if self.reasoning_enabled:
+            thinking_level = "high" if self.reasoning_effort == "xhigh" else self.reasoning_effort
+            if thinking_level and thinking_level != "none":
+                generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
         return {
             "systemInstruction": {"parts": [{"text": prompt_parts.static_prefix}]},
             "contents": [{"role": "user", "parts": self._parts(context)}],
-            "generationConfig": {
-                "maxOutputTokens": self.max_output_tokens,
-                "responseMimeType": "application/json",
-                "thinkingConfig": {"thinkingLevel": self.thinking_level},
-            },
+            "generationConfig": generation_config,
         }
 
     def _error_result(

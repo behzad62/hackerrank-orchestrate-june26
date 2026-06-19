@@ -118,16 +118,22 @@ def test_config_defaults_to_honest_none_provider(monkeypatch, tmp_path):
     assert cfg.paths.output_csv == tmp_path / "output.csv"
 
 
-def test_config_reads_retry_and_gemini_generation_controls(monkeypatch, tmp_path):
+def test_config_reads_retry_and_reasoning_generation_controls(monkeypatch, tmp_path):
     monkeypatch.setenv("VLM_RETRY_MAX_SLEEP_SECONDS", "45")
     monkeypatch.setenv("VLM_MAX_OUTPUT_TOKENS", "4096")
-    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "low")
+    monkeypatch.setenv("VLM_REASONING_ENABLED", "true")
+    monkeypatch.setenv("VLM_REASONING_EFFORT", "low")
+    monkeypatch.setenv("VLM_REASONING_MAX_TOKENS", "1200")
+    monkeypatch.setenv("VLM_REASONING_EXCLUDE", "true")
 
     cfg = AppConfig.from_env(repo_root=tmp_path)
 
     assert cfg.retry_max_sleep_seconds == 45
     assert cfg.max_output_tokens == 4096
-    assert cfg.gemini_thinking_level == "low"
+    assert cfg.reasoning_enabled is True
+    assert cfg.reasoning_effort == "low"
+    assert cfg.reasoning_max_tokens == 1200
+    assert cfg.reasoning_exclude is True
 
 
 def test_config_reads_backup_chain(monkeypatch, tmp_path):

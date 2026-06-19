@@ -80,25 +80,35 @@ def _write_report(
     test_images = _count_images(test_rows)
     scores = metrics.get("risk_flag_scores", {})
     image_scores = metrics.get("supporting_image_id_scores", {})
-    avg_prompt_tokens = sample_prompt_tokens / sample_model_calls if sample_model_calls else 0.0
-    avg_completion_tokens = sample_completion_tokens / sample_model_calls if sample_model_calls else 0.0
-    cache_hit_ratio = sample_cached_tokens / sample_prompt_tokens if sample_prompt_tokens else 0.0
-    projected_prompt_tokens = int(round(avg_prompt_tokens * test_model_calls))
-    projected_completion_tokens = int(round(avg_completion_tokens * test_model_calls))
     model_prices = model_prices or {}
     calls_by_model = calls_by_model or {}
     backup_reasons = backup_reasons or {}
+    priced_response_calls = sum(int(usage.get("calls", 0)) for usage in calls_by_model.values())
+    token_average_denominator = priced_response_calls or sample_model_calls
+    avg_prompt_tokens = sample_prompt_tokens / token_average_denominator if token_average_denominator else 0.0
+    avg_completion_tokens = sample_completion_tokens / token_average_denominator if token_average_denominator else 0.0
+    cache_hit_ratio = sample_cached_tokens / sample_prompt_tokens if sample_prompt_tokens else 0.0
+    row_scale = (len(test_rows) / len(sample_rows)) if sample_rows else 0.0
+    if calls_by_model:
+        projected_prompt_tokens = int(
+            round(sum(int(usage.get("prompt_tokens", 0)) for usage in calls_by_model.values()) * row_scale)
+        )
+        projected_completion_tokens = int(
+            round(sum(int(usage.get("completion_tokens", 0)) for usage in calls_by_model.values()) * row_scale)
+        )
+    else:
+        projected_prompt_tokens = int(round(avg_prompt_tokens * test_model_calls))
+        projected_completion_tokens = int(round(avg_completion_tokens * test_model_calls))
     estimated_cost = _estimate_projected_cost(
         calls_by_model,
         model_prices,
         default_input=input_price_per_million,
         default_output=output_price_per_million,
-        sample_model_calls=sample_model_calls,
-        test_model_calls=test_model_calls,
+        row_scale=row_scale,
         fallback_prompt_tokens=projected_prompt_tokens,
         fallback_completion_tokens=projected_completion_tokens,
     )
-    avg_latency_seconds = (sample_latency_ms / sample_model_calls / 1000) if sample_model_calls else 0.0
+    avg_latency_seconds = (sample_latency_ms / token_average_denominator / 1000) if token_average_denominator else 0.0
     estimated_runtime_seconds = avg_latency_seconds * test_model_calls
     estimates_available = bool(sample_model_calls or not test_model_calls)
     no_fresh_call_text = "unavailable (sample run had no fresh provider calls)"
@@ -207,8 +217,8 @@ The system uses one multimodal call per claim row when a real VLM provider is co
 Pricing assumptions:
 - Provider pricing varies by selected model.
 - Use provider token accounting from logs/provider metadata when available.
-- Input token price assumption: ${input_price_per_million:.4f} / 1M tokens.
-- Output token price assumption: ${output_price_per_million:.4f} / 1M tokens.
+- Unlisted model input price default: ${input_price_per_million:.4f} / 1M tokens.
+- Unlisted model output price default: ${output_price_per_million:.4f} / 1M tokens.
 - Model-specific price assumptions:
 {model_price_lines}
 - With `VLM_PROVIDER=none`, images were not inspected and model cost is $0.
@@ -274,20 +284,17 @@ def _estimate_projected_cost(
     *,
     default_input: float,
     default_output: float,
-    sample_model_calls: int,
-    test_model_calls: int,
+    row_scale: float,
     fallback_prompt_tokens: int,
     fallback_completion_tokens: int,
 ) -> float:
     if not calls_by_model:
         return ((fallback_prompt_tokens * default_input) + (fallback_completion_tokens * default_output)) / 1_000_000
-    priced_calls = sum(int(usage.get("calls", 0)) for usage in calls_by_model.values())
-    scale = (test_model_calls / priced_calls) if priced_calls else 0.0
     total = 0.0
     for (provider, model), usage in calls_by_model.items():
         input_price, output_price = _price_for_model(provider, model, model_prices, default_input, default_output)
-        projected_prompt = int(round(int(usage.get("prompt_tokens", 0)) * scale))
-        projected_completion = int(round(int(usage.get("completion_tokens", 0)) * scale))
+        projected_prompt = int(round(int(usage.get("prompt_tokens", 0)) * row_scale))
+        projected_completion = int(round(int(usage.get("completion_tokens", 0)) * row_scale))
         total += (projected_prompt * input_price) + (projected_completion * output_price)
     return total / 1_000_000
 
@@ -477,9 +484,13 @@ def main() -> int:
     run_summary = _latest_run_provider_summary(paths.logs_dir / "run.jsonl")
     observed_provider = str(run_summary["observed_provider"])
     sample_model_calls = int(run_summary["model_calls"])
-    test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} else 0
-    input_price_per_million = float(os.environ.get("VLM_INPUT_PRICE_PER_MILLION", "0"))
-    output_price_per_million = float(os.environ.get("VLM_OUTPUT_PRICE_PER_MILLION", "0"))
+    if observed_provider in {"none", "unknown"}:
+        test_model_calls = 0
+    else:
+        row_scale = (len(test_rows) / len(expected)) if expected else 0.0
+        test_model_calls = int(round(sample_model_calls * row_scale))
+    input_price_per_million = 0.0
+    output_price_per_million = 0.0
     model_prices = parse_model_prices(os.environ.get("VLM_MODEL_PRICES", ""))
     _write_report(
         report_path,

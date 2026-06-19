@@ -108,6 +108,10 @@ class OpenAICompatibleProvider:
         max_output_tokens: int = 1800,
         prompt_cache_enabled: bool = True,
         prompt_cache_retention: str = "24h",
+        reasoning_enabled: bool = False,
+        reasoning_effort: str = "low",
+        reasoning_max_tokens: int = 0,
+        reasoning_exclude: bool = True,
     ):
         self.name = provider
         self.api_key = api_key
@@ -118,6 +122,10 @@ class OpenAICompatibleProvider:
         self.max_output_tokens = max_output_tokens
         self.prompt_cache_enabled = prompt_cache_enabled
         self.prompt_cache_retention = prompt_cache_retention
+        self.reasoning_enabled = reasoning_enabled
+        self.reasoning_effort = reasoning_effort.strip().lower()
+        self.reasoning_max_tokens = reasoning_max_tokens
+        self.reasoning_exclude = reasoning_exclude
 
     def _headers(self) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -152,6 +160,17 @@ class OpenAICompatibleProvider:
             {"role": "system", "content": [static_block]},
             {"role": "user", "content": self._dynamic_content(context)},
         ]
+
+    def _reasoning_config(self) -> dict[str, Any] | None:
+        if not self.reasoning_enabled:
+            return None
+        config: dict[str, Any] = {"enabled": True}
+        if self.reasoning_max_tokens > 0:
+            config["max_tokens"] = self.reasoning_max_tokens
+        elif self.reasoning_effort:
+            config["effort"] = self.reasoning_effort
+        config["exclude"] = self.reasoning_exclude
+        return config
 
     def _error_result(
         self,
@@ -238,6 +257,9 @@ class OpenAICompatibleProvider:
         payload[token_limit_key] = self.max_output_tokens
         if self.name == "openrouter" and self.prompt_cache_enabled:
             payload["session_id"] = "hackerrank-orchestrate-claim-review-v1"
+        reasoning_config = self._reasoning_config()
+        if reasoning_config and self.name == "openrouter":
+            payload["reasoning"] = reasoning_config
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
