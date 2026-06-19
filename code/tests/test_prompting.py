@@ -61,6 +61,18 @@ def test_laptop_prompt_contract_does_not_include_car_only_object_part():
     assert "front_bumper" not in prompt
 
 
+def test_provider_json_contract_uses_neutral_decision_placeholders():
+    contract = provider_json_contract()
+    assert '"claim_status": "supported"' not in contract
+    assert '"supporting_image_ids": [\n      "img_1"\n    ]' not in contract
+    assert '"evidence_standard_met": true' not in contract.lower()
+    assert '"valid_image": true' not in contract.lower()
+    assert '"risk_flags": [\n      "none"\n    ]' not in contract
+    assert '"severity": "low"' not in contract
+    assert "supported|contradicted|not_enough_information selected from visual evidence" in contract
+    assert "image IDs that support the decision, or empty list" in contract
+
+
 def test_prompt_includes_context_and_image_metadata_without_base64_bytes():
     context = PredictionContext(
         row_index=3,
