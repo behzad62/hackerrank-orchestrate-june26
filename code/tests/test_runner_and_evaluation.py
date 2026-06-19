@@ -11,6 +11,8 @@ def test_redact_value_hides_obvious_secrets_and_truncates_long_strings():
     assert redact_value("sk-live-secret") == "[REDACTED]"
     assert redact_value("sk-ant-secret") == "[REDACTED]"
     assert redact_value("Bearer token-value") == "[REDACTED]"
+    assert redact_value("provider rejected invalid API key sk-abc123 in request") == "[REDACTED]"
+    assert redact_value("debug: authorization failed for sk-ant-abc123 token") == "[REDACTED]"
     long_prose = ("This is ordinary prose, not a base64 payload. " * 8).strip()
     assert redact_value(long_prose) == long_prose[:240] + "..."
 
@@ -20,6 +22,9 @@ def test_redact_value_hides_generic_image_data_and_base64_payloads():
     assert redact_value("data:image;base64," + ("a" * 300)) == "[REDACTED]"
     assert redact_value("A" * 320) == "[REDACTED]"
     assert redact_value("a" * 300) == "[REDACTED]"
+    assert redact_value(("A_B-" * 80) + "==") == "[REDACTED]"
+    wrapped_payload = "\n".join(["QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="] * 10)
+    assert redact_value(wrapped_payload) == "[REDACTED]"
 
 
 def test_jsonl_logger_writes_safe_events(tmp_path):

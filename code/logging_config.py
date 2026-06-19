@@ -10,19 +10,21 @@ SECRET_MARKERS = ("api_key", "authorization", "token", "secret", "cookie")
 IMAGE_PAYLOAD_MARKERS = ("data_base64", "base64", "image_payload", "image_bytes", "raw_image")
 MAX_STRING_LENGTH = 240
 IMAGE_DATA_URI_PATTERN = re.compile(r"data:image(?:/[a-z0-9.+-]+)?;base64,", re.IGNORECASE)
-LIKELY_BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+SECRET_TOKEN_PATTERN = re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9._-]{6,}\b")
+LIKELY_BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/_-]+$")
 
 
 def _looks_like_base64_payload(value: str) -> bool:
-    if len(value) < MAX_STRING_LENGTH:
+    normalized = re.sub(r"\s+", "", value)
+    if len(normalized) < MAX_STRING_LENGTH:
         return False
-    return bool(LIKELY_BASE64_PATTERN.fullmatch(value))
+    return bool(LIKELY_BASE64_PATTERN.fullmatch(normalized.replace("=", "")))
 
 
 def redact_value(value: Any) -> Any:
     if isinstance(value, str):
         lowered = value.lower()
-        if value.startswith(("sk-", "sk-ant-")) or "bearer " in lowered:
+        if SECRET_TOKEN_PATTERN.search(value) or "bearer " in lowered:
             return "[REDACTED]"
         if IMAGE_DATA_URI_PATTERN.search(value) or _looks_like_base64_payload(value):
             return "[REDACTED]"
