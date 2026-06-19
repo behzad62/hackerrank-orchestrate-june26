@@ -170,7 +170,7 @@ from evaluation.metrics import (
     supporting_image_id_scores,
     write_errors_csv,
 )
-from evaluation.main import _write_report
+from evaluation.main import _latest_run_provider_summary, _write_report
 
 
 def write_task7_minimal_dataset(root, user_claim="screen cracked"):
@@ -768,6 +768,32 @@ def test_evaluation_report_uses_observed_provider_for_fallback_call_counts(tmp_p
     assert "Fallback actually used/no-vision: `True`" in report
     assert "Model calls: 0" in report
     assert "Expected model calls: 0" in report
+
+
+def test_latest_run_provider_summary_does_not_count_cache_hits_as_model_calls(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "run_started", "provider": "openai"}),
+                json.dumps(
+                    {
+                        "event": "provider_response",
+                        "provider": "openai",
+                        "cache_hit": True,
+                        "used_fallback": False,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_run_provider_summary(log_path)
+
+    assert summary["observed_provider"] == "openai"
+    assert summary["fallback_used"] is False
+    assert summary["model_calls"] == 0
 
 
 def test_evaluation_cli_smoke_writes_predictions_errors_metrics_and_report(tmp_path):

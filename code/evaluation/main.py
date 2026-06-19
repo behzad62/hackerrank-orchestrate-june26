@@ -195,7 +195,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             providers.add(provider)
             if record.get("used_fallback") is True:
                 fallback_used = True
-            elif provider != "none":
+            elif provider != "none" and record.get("cache_hit") is not True:
                 model_calls += 1
     observed_provider = "unknown"
     if len(providers) == 1:
