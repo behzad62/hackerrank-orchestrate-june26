@@ -78,6 +78,9 @@ class AppConfig:
     allow_no_vision_fallback: bool = True
     allow_backup_vlm: bool = False
     backup_chain: tuple[ProviderSpec, ...] = ()
+    max_concurrency: int = 1
+    requests_per_minute: int = 0
+    backup_max_concurrency: int = 1
     max_output_tokens: int = 1800
     prompt_cache_enabled: bool = True
     prompt_cache_retention: str = "24h"
@@ -105,6 +108,9 @@ class AppConfig:
             allow_no_vision_fallback=_env_bool("ALLOW_NO_VISION_FALLBACK", True),
             allow_backup_vlm=_env_bool("ALLOW_BACKUP_VLM", False),
             backup_chain=parse_backup_chain(os.environ.get("VLM_BACKUP_CHAIN", "")),
+            max_concurrency=int(os.environ.get("VLM_MAX_CONCURRENCY", "1")),
+            requests_per_minute=int(os.environ.get("VLM_REQUESTS_PER_MINUTE", "0")),
+            backup_max_concurrency=int(os.environ.get("VLM_BACKUP_MAX_CONCURRENCY", "1")),
             max_output_tokens=int(os.environ.get("VLM_MAX_OUTPUT_TOKENS", "1800")),
             prompt_cache_enabled=_env_bool("PROMPT_CACHE_ENABLED", True),
             prompt_cache_retention=os.environ.get("PROMPT_CACHE_RETENTION", "24h").strip(),
@@ -129,6 +135,9 @@ class AppConfig:
         model: str | None = None,
         retries: int | None = None,
         fallback: bool | None = None,
+        max_concurrency: int | None = None,
+        requests_per_minute: int | None = None,
+        backup_max_concurrency: int | None = None,
         prompt_cache_enabled: bool | None = None,
         prompt_cache_retention: str | None = None,
         save_errors: bool | None = None,
@@ -154,6 +163,11 @@ class AppConfig:
             model=(model if model is not None else self.model).strip(),
             max_retries=retries if retries is not None else self.max_retries,
             allow_no_vision_fallback=fallback if fallback is not None else self.allow_no_vision_fallback,
+            max_concurrency=max_concurrency if max_concurrency is not None else self.max_concurrency,
+            requests_per_minute=requests_per_minute if requests_per_minute is not None else self.requests_per_minute,
+            backup_max_concurrency=(
+                backup_max_concurrency if backup_max_concurrency is not None else self.backup_max_concurrency
+            ),
             prompt_cache_enabled=(
                 prompt_cache_enabled if prompt_cache_enabled is not None else self.prompt_cache_enabled
             ),
@@ -177,6 +191,9 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=["openai", "openrouter", "anthropic", "gemini", "none"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--retries", type=int, default=None)
+    parser.add_argument("--max-concurrency", type=int, default=None)
+    parser.add_argument("--requests-per-minute", type=int, default=None)
+    parser.add_argument("--backup-max-concurrency", type=int, default=None)
     parser.add_argument("--fallback", dest="fallback", action="store_true", default=None)
     parser.add_argument("--no-fallback", dest="fallback", action="store_false")
     parser.add_argument("--prompt-cache", dest="prompt_cache_enabled", action="store_true", default=None)

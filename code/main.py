@@ -20,6 +20,9 @@ def main() -> int:
         model=args.model,
         retries=args.retries,
         fallback=args.fallback,
+        max_concurrency=args.max_concurrency,
+        requests_per_minute=args.requests_per_minute,
+        backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
     )

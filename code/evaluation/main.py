@@ -75,6 +75,10 @@ def _write_report(
     primary_provider_calls: int = 0,
     backup_provider_calls: int = 0,
     fallback_rows: int = 0,
+    max_concurrency: int = 1,
+    rate_limit_waits: int = 0,
+    run_total_duration_ms: int = 0,
+    cache_hits: int = 0,
 ) -> None:
     sample_images = _count_images(sample_rows)
     test_images = _count_images(test_rows)
@@ -203,6 +207,9 @@ Sample set:
 - Primary provider calls: {primary_provider_calls}
 - Backup provider calls: {backup_provider_calls}
 - Fallback rows: {fallback_rows}
+- Cache hits: {cache_hits}
+- Configured max concurrency: {max_concurrency}
+- Rate-limit waits: {rate_limit_waits}
 
 Backup reasons:
 {backup_reason_lines}
@@ -240,6 +247,7 @@ Estimated full-test token usage and cost:
 
 Latency/runtime estimate:
 - Observed total provider latency: {observed_latency_text}
+- Observed total run runtime: {run_total_duration_ms / 1000:.2f}s
 - Observed average latency per fresh call: {avg_latency_text}
 - Estimated full-test provider runtime at current sequential settings: {estimated_runtime_text}
 
@@ -349,6 +357,10 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "primary_provider_calls": 0,
         "backup_provider_calls": 0,
         "fallback_rows": 0,
+        "max_concurrency": 1,
+        "rate_limit_waits": 0,
+        "run_total_duration_ms": 0,
+        "cache_hits": 0,
     }
     if not log_path.exists():
         return summary
@@ -361,6 +373,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     primary_provider_calls = 0
     backup_provider_calls = 0
     fallback_rows = 0
+    rate_limit_waits = 0
     for line in log_path.read_text(encoding="utf-8").splitlines():
         try:
             record = json.loads(line)
@@ -375,6 +388,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             primary_provider_calls = 0
             backup_provider_calls = 0
             fallback_rows = 0
+            rate_limit_waits = 0
             summary["prompt_tokens"] = 0
             summary["completion_tokens"] = 0
             summary["cached_tokens"] = 0
@@ -383,6 +397,12 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
             fallback_used = True
+        if record.get("event") == "rate_limiter_wait":
+            rate_limit_waits += 1
+        if record.get("event") == "run_completed":
+            summary["max_concurrency"] = int(record.get("max_concurrency") or 1)
+            summary["run_total_duration_ms"] = int(record.get("total_duration_ms") or 0)
+            summary["cache_hits"] = int(record.get("cache_hits") or 0)
         if record.get("event") == "claim_completed":
             if record.get("backup_used") is True:
                 reason = str(record.get("backup_reason") or "unknown_provider_error")
@@ -433,6 +453,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     summary["primary_provider_calls"] = primary_provider_calls
     summary["backup_provider_calls"] = backup_provider_calls
     summary["fallback_rows"] = fallback_rows
+    summary["rate_limit_waits"] = rate_limit_waits
     return summary
 
 
@@ -453,6 +474,9 @@ def main() -> int:
         model=args.model,
         retries=args.retries,
         fallback=args.fallback,
+        max_concurrency=args.max_concurrency,
+        requests_per_minute=args.requests_per_minute,
+        backup_max_concurrency=args.backup_max_concurrency,
         prompt_cache_enabled=args.prompt_cache_enabled,
         prompt_cache_retention=args.prompt_cache_retention,
         save_errors=args.save_errors,
@@ -517,6 +541,10 @@ def main() -> int:
         primary_provider_calls=int(run_summary["primary_provider_calls"]),
         backup_provider_calls=int(run_summary["backup_provider_calls"]),
         fallback_rows=int(run_summary["fallback_rows"]),
+        max_concurrency=int(run_summary["max_concurrency"]),
+        rate_limit_waits=int(run_summary["rate_limit_waits"]),
+        run_total_duration_ms=int(run_summary["run_total_duration_ms"]),
+        cache_hits=int(run_summary["cache_hits"]),
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")

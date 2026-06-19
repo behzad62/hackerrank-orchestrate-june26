@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,7 @@ class JsonlLogger:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def write(self, event_name: str, **fields: Any) -> None:
         record = {
@@ -79,5 +81,7 @@ class JsonlLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": event_name,
         }
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(_safe_record(record), ensure_ascii=False) + "\n")
+        line = json.dumps(_safe_record(record), ensure_ascii=False)
+        with self._lock:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(line + "\n")

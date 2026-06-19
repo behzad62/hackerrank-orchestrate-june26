@@ -82,6 +82,25 @@ def test_jsonl_logger_appends_one_json_object_per_line(tmp_path):
     assert [record["count"] for record in records] == [1, 2]
 
 
+def test_jsonl_logger_is_thread_safe(tmp_path):
+    logger = JsonlLogger(tmp_path / "run.jsonl")
+
+    def write_many(worker_id):
+        for index in range(25):
+            logger.write("worker_event", worker_id=worker_id, index=index)
+
+    threads = [threading.Thread(target=write_many, args=(worker_id,)) for worker_id in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    lines = (tmp_path / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+    assert len(records) == 100
+    assert all(record["event"] == "worker_event" for record in records)
+
+
 def test_jsonl_logger_preserves_generated_timestamp_and_event(tmp_path):
     logger = JsonlLogger(tmp_path / "run.jsonl")
     logger.write("safe_event", timestamp="caller timestamp", event="caller event", detail="kept")
@@ -148,6 +167,31 @@ def test_cache_round_trip(tmp_path):
     assert read_cache(tmp_path, key)["decision"]["claim_status"] == "not_enough_information"
 
 
+def test_cache_read_treats_corrupt_json_as_miss(tmp_path):
+    key = "a" * 64
+    tmp_path.mkdir(exist_ok=True)
+    (tmp_path / f"{key}.json").write_text("{broken", encoding="utf-8")
+
+    assert read_cache(tmp_path, key) is None
+
+
+def test_cache_concurrent_writes_remain_valid_json(tmp_path):
+    key = "b" * 64
+
+    def write_value(value):
+        write_cache(tmp_path, key, {"value": value, "decision": {"claim_status": "supported"}})
+
+    threads = [threading.Thread(target=write_value, args=(index,)) for index in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    payload = read_cache(tmp_path, key)
+    assert payload["decision"]["claim_status"] == "supported"
+    assert payload["value"] in range(10)
+
+
 @pytest.mark.parametrize(
     "unsafe_key",
     [
@@ -170,6 +214,8 @@ import csv
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from config import AppConfig
@@ -216,6 +262,38 @@ def write_task7_minimal_dataset(root, user_claim="screen cracked"):
     image = dataset / "images" / "test" / "case_001" / "img_1.jpg"
     image.parent.mkdir(parents=True)
     image.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+
+
+def write_multi_row_dataset(root, count=5):
+    dataset = root / "dataset"
+    dataset.mkdir()
+    claim_lines = ["user_id,image_paths,user_claim,claim_object"]
+    expected_lines = [
+        "user_id,image_paths,user_claim,claim_object,evidence_standard_met,evidence_standard_met_reason,risk_flags,issue_type,object_part,claim_status,claim_status_justification,supporting_image_ids,valid_image,severity"
+    ]
+    history_lines = [
+        "user_id,past_claim_count,accept_claim,manual_review_claim,rejected_claim,last_90_days_claim_count,history_flags,history_summary"
+    ]
+    for index in range(1, count + 1):
+        user_id = f"u{index}"
+        image_path = f"images/test/case_{index:03d}/img_1.jpg"
+        claim = f"screen cracked row {index}"
+        claim_lines.append(f"{user_id},{image_path},{claim},laptop")
+        expected_lines.append(
+            f"{user_id},{image_path},{claim},laptop,false,No VLM,manual_review_required,unknown,unknown,not_enough_information,No review,none,false,unknown"
+        )
+        history_lines.append(f"{user_id},1,1,0,0,0,none,No risk")
+        image = dataset / "images" / "test" / f"case_{index:03d}" / "img_1.jpg"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"\xff\xd8\xff\xe0jpeg")
+    (dataset / "claims.csv").write_text("\n".join(claim_lines) + "\n", encoding="utf-8")
+    (dataset / "sample_claims.csv").write_text("\n".join(expected_lines) + "\n", encoding="utf-8")
+    (dataset / "user_history.csv").write_text("\n".join(history_lines) + "\n", encoding="utf-8")
+    (dataset / "evidence_requirements.csv").write_text(
+        "requirement_id,claim_object,applies_to,minimum_image_evidence\n"
+        "REQ_ALL,all,general,Relevant part visible\n",
+        encoding="utf-8",
+    )
 
 
 def test_build_provider_none(tmp_path):
@@ -331,6 +409,31 @@ def test_run_predictions_with_none_provider_creates_schema_valid_output_and_logs
     assert '"event": "run_started"' in log_text
     assert '"event": "claim_completed"' in log_text
     assert "base64" not in log_text
+
+
+def test_run_predictions_with_parallel_none_provider_preserves_row_order(tmp_path):
+    write_multi_row_dataset(tmp_path, count=5)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="none",
+        model="",
+        allow_no_vision_fallback=True,
+        max_concurrency=3,
+        paths=paths,
+    )
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert [row["user_id"] for row in rows] == ["u1", "u2", "u3", "u4", "u5"]
+    assert len(rows) == 5
+    records = [
+        json.loads(line)
+        for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(record["event"] == "worker_claim_started" for record in records)
+    run_completed = [record for record in records if record["event"] == "run_completed"][-1]
+    assert run_completed["rows_processed"] == 5
+    assert run_completed["max_concurrency"] == 3
 
 
 def test_run_predictions_retries_retryable_provider_errors(monkeypatch, tmp_path):
@@ -459,6 +562,88 @@ def test_run_predictions_uses_backup_after_operational_provider_failure(monkeypa
     assert '"backup_reason": "rate_limited"' in log_text
     assert '"final_provider": "openrouter"' in log_text
     assert '"backup_used": true' in log_text
+
+
+def test_run_predictions_uses_backup_chain_under_concurrency(monkeypatch, tmp_path):
+    write_multi_row_dataset(tmp_path, count=4)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        max_retries=0,
+        max_concurrency=4,
+        backup_max_concurrency=1,
+        allow_backup_vlm=True,
+        backup_chain=(("openrouter", "qwen/qwen3.7-plus"),),
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+    active_backup_calls = 0
+    max_active_backup_calls = 0
+    lock = threading.Lock()
+
+    class ErrorProvider:
+        name = "gemini"
+        model = "gemini-3.5-flash"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="gemini",
+                    model="gemini-3.5-flash",
+                    error_category="rate_limited",
+                ),
+            )
+
+    class BackupProvider:
+        name = "openrouter"
+        model = "qwen/qwen3.7-plus"
+
+        def review_claim(self, context):
+            nonlocal active_backup_calls, max_active_backup_calls
+            with lock:
+                active_backup_calls += 1
+                max_active_backup_calls = max(max_active_backup_calls, active_backup_calls)
+            time.sleep(0.01)
+            with lock:
+                active_backup_calls -= 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openrouter", model="qwen/qwen3.7-plus"),
+            )
+
+    def fake_build_provider(config, spec, allow_key_fallback=False):
+        provider_name = spec.provider if hasattr(spec, "provider") else spec[0]
+        if provider_name == "gemini":
+            return ErrorProvider()
+        return BackupProvider()
+
+    monkeypatch.setattr("runner.build_provider_for_spec", fake_build_provider)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert len(rows) == 4
+    assert all(row["claim_status"] == "supported" for row in rows)
+    assert max_active_backup_calls == 1
+    records = [
+        json.loads(line)
+        for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(1 for record in records if record.get("event") == "claim_completed" and record.get("backup_used") is True) == 4
 
 
 def test_run_predictions_does_not_use_backup_for_valid_not_enough_information(monkeypatch, tmp_path):
