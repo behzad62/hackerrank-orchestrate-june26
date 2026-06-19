@@ -122,7 +122,7 @@ def build_common_arg_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--log", type=Path, default=None)
     parser.add_argument("--cache", type=Path, default=None)
     parser.add_argument("--env", type=Path, default=None)
-    parser.add_argument("--provider", choices=["openai", "openrouter", "anthropic", "none"], default=None)
+    parser.add_argument("--provider", choices=["openai", "openrouter", "anthropic", "gemini", "none"], default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--retries", type=int, default=None)
     parser.add_argument("--fallback", dest="fallback", action="store_true", default=None)

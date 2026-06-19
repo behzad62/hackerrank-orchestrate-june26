@@ -5,6 +5,7 @@ import pytest
 import requests
 
 from providers.anthropic import AnthropicProvider
+from providers.gemini import GeminiProvider, categorize_gemini_http_error
 from providers.openai_compatible import OpenAICompatibleProvider, categorize_http_error, extract_json_object
 from schemas import PreparedImage, PredictionContext
 
@@ -74,6 +75,14 @@ def test_categorize_http_error():
     assert categorize_http_error(529, "overloaded") == "server_error"
     assert categorize_http_error(500, "server") == "server_error"
     assert categorize_http_error(418, "teapot") == "unknown_provider_error"
+
+
+def test_categorize_gemini_http_error():
+    assert categorize_gemini_http_error(403, "PERMISSION_DENIED") == "auth_error"
+    assert categorize_gemini_http_error(429, "RESOURCE_EXHAUSTED") == "rate_limited"
+    assert categorize_gemini_http_error(400, "Request payload size exceeds the limit") == "context_length_exceeded"
+    assert categorize_gemini_http_error(400, "INVALID_ARGUMENT") == "bad_request"
+    assert categorize_gemini_http_error(500, "INTERNAL") == "server_error"
 
 
 def test_openai_compatible_packages_image_url(monkeypatch):
@@ -862,3 +871,89 @@ def test_anthropic_prioritizes_max_tokens_over_incomplete_json(monkeypatch):
     assert result.metadata.error_category == "response_truncated"
     assert result.metadata.finish_reason == "max_tokens"
     assert result.metadata.total_tokens == 18
+
+
+def test_gemini_packages_inline_images_and_static_system_instruction(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse(
+            payload={
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {"parts": [{"text": '{"decision":{"claim_status":"supported"}}'}]},
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 90,
+                    "candidatesTokenCount": 11,
+                    "totalTokenCount": 101,
+                    "cachedContentTokenCount": 45,
+                },
+            },
+            headers={"x-request-id": "gem_req_1"},
+        )
+
+    monkeypatch.setattr("providers.gemini.requests.post", fake_post)
+    provider = GeminiProvider(api_key="gemini-test", model="gemini-3.5-flash", max_output_tokens=1800)
+    result = provider.review_claim(sample_context())
+
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+    assert captured["headers"]["x-goog-api-key"] == "gemini-test"
+    assert captured["json"]["systemInstruction"]["parts"][0]["text"]
+    assert "front bumper scratch" not in captured["json"]["systemInstruction"]["parts"][0]["text"]
+    parts = captured["json"]["contents"][0]["parts"]
+    assert parts[0]["text"].startswith("Allowed object_part for this row:")
+    assert any(part.get("inline_data") == {"mime_type": "image/jpeg", "data": "abcd"} for part in parts)
+    assert captured["json"]["generationConfig"] == {
+        "maxOutputTokens": 1800,
+        "responseMimeType": "application/json",
+        "thinkingConfig": {"thinkingLevel": "medium"},
+    }
+    assert result.raw_json["decision"]["claim_status"] == "supported"
+    assert result.metadata.prompt_tokens == 90
+    assert result.metadata.completion_tokens == 11
+    assert result.metadata.cached_tokens == 45
+    assert result.metadata.cache_hit_ratio == 0.5
+    assert result.metadata.prompt_cache_key_used is True
+
+
+def test_gemini_marks_max_tokens_as_truncated(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"decision":{"claim_status":"supported"}}'}]},
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 90, "candidatesTokenCount": 1, "totalTokenCount": 91},
+            }
+        )
+
+    monkeypatch.setattr("providers.gemini.requests.post", fake_post)
+    provider = GeminiProvider(api_key="gemini-test", model="gemini-3.5-flash")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.finish_reason == "MAX_TOKENS"
+    assert result.metadata.error_category == "response_truncated"
+
+
+def test_gemini_returns_error_metadata(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(status_code=429, text='{"error":{"status":"RESOURCE_EXHAUSTED"}}')
+
+    monkeypatch.setattr("providers.gemini.requests.post", fake_post)
+    provider = GeminiProvider(api_key="gemini-test", model="gemini-3.5-flash")
+    result = provider.review_claim(sample_context())
+
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.http_status == 429
+    assert result.metadata.error_category == "rate_limited"

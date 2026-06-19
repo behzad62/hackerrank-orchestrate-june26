@@ -11,7 +11,7 @@ from data import load_claim_rows, load_evidence_requirements, load_user_history,
 from images import prepare_images
 from logging_config import JsonlLogger
 from normalization import normalize_provider_result
-from providers import AnthropicProvider, FallbackProvider, OpenAICompatibleProvider
+from providers import AnthropicProvider, FallbackProvider, GeminiProvider, OpenAICompatibleProvider
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 from security import detect_prompt_injection_flags
 
@@ -74,6 +74,20 @@ def build_provider(cfg: AppConfig):
             api_key=key,
             model=cfg.model,
             temperature=cfg.temperature,
+            timeout_seconds=cfg.timeout_seconds,
+            max_output_tokens=cfg.max_output_tokens,
+            prompt_cache_enabled=cfg.prompt_cache_enabled,
+            prompt_cache_retention=cfg.prompt_cache_retention,
+        )
+    if provider == "gemini":
+        key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+        if not key:
+            if cfg.allow_no_vision_fallback:
+                return FallbackProvider()
+            raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is required when VLM_PROVIDER=gemini")
+        return GeminiProvider(
+            api_key=key,
+            model=cfg.model or "gemini-3.5-flash",
             timeout_seconds=cfg.timeout_seconds,
             max_output_tokens=cfg.max_output_tokens,
             prompt_cache_enabled=cfg.prompt_cache_enabled,

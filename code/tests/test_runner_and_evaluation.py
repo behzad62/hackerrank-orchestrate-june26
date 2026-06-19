@@ -226,6 +226,7 @@ def test_build_provider_none(tmp_path):
         ("openai", "OPENAI_API_KEY"),
         ("openrouter", "OPENROUTER_API_KEY"),
         ("anthropic", "ANTHROPIC_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
     ],
 )
 def test_build_provider_missing_real_key_fails_fast_unless_fallback_allowed(

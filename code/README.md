@@ -17,11 +17,12 @@ python -m pip install -r code/requirements.txt
 ## Environment
 
 ```bash
-VLM_PROVIDER=openai|openrouter|anthropic|none
+VLM_PROVIDER=openai|openrouter|anthropic|gemini|none
 VLM_MODEL=gpt-4.1-mini
 OPENAI_API_KEY=sk-redacted
 OPENROUTER_API_KEY=sk-or-redacted
 ANTHROPIC_API_KEY=sk-ant-redacted
+GEMINI_API_KEY=redacted
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=90
