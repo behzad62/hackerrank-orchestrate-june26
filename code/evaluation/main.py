@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -61,11 +62,26 @@ def _write_report(
     fallback_used: bool,
     sample_model_calls: int,
     test_model_calls: int,
+    sample_prompt_tokens: int = 0,
+    sample_completion_tokens: int = 0,
+    sample_latency_ms: int = 0,
+    input_price_per_million: float = 0.0,
+    output_price_per_million: float = 0.0,
 ) -> None:
     sample_images = _count_images(sample_rows)
     test_images = _count_images(test_rows)
     scores = metrics.get("risk_flag_scores", {})
     image_scores = metrics.get("supporting_image_id_scores", {})
+    avg_prompt_tokens = sample_prompt_tokens / sample_model_calls if sample_model_calls else 0.0
+    avg_completion_tokens = sample_completion_tokens / sample_model_calls if sample_model_calls else 0.0
+    projected_prompt_tokens = int(round(avg_prompt_tokens * test_model_calls))
+    projected_completion_tokens = int(round(avg_completion_tokens * test_model_calls))
+    estimated_cost = (
+        (projected_prompt_tokens * input_price_per_million)
+        + (projected_completion_tokens * output_price_per_million)
+    ) / 1_000_000
+    avg_latency_seconds = (sample_latency_ms / sample_model_calls / 1000) if sample_model_calls else 0.0
+    estimated_runtime_seconds = avg_latency_seconds * test_model_calls
     if provider == "none":
         fallback_note = "No VLM provider was configured, so images were not inspected and model cost is $0."
     elif fallback_used:
@@ -137,8 +153,26 @@ The system uses one multimodal call per claim row when a real VLM provider is co
 Pricing assumptions:
 - Provider pricing varies by selected model.
 - Use provider token accounting from logs/provider metadata when available.
+- Input token price assumption: ${input_price_per_million:.4f} / 1M tokens.
+- Output token price assumption: ${output_price_per_million:.4f} / 1M tokens.
 - With `VLM_PROVIDER=none`, images were not inspected and model cost is $0.
 - If fallback is observed during a real-provider run, fallback rows did not receive visual inspection; provider rows may still have token costs.
+
+Observed token usage:
+- Observed prompt tokens: {sample_prompt_tokens}
+- Observed output tokens: {sample_completion_tokens}
+- Observed average prompt tokens per fresh call: {avg_prompt_tokens:.1f}
+- Observed average output tokens per fresh call: {avg_completion_tokens:.1f}
+
+Estimated full-test token usage and cost:
+- Projected input tokens: {projected_prompt_tokens}
+- Projected output tokens: {projected_completion_tokens}
+- Estimated full-test cost: ${estimated_cost:.4f}
+
+Latency/runtime estimate:
+- Observed total provider latency: {sample_latency_ms / 1000:.2f}s
+- Observed average latency per fresh call: {avg_latency_seconds:.2f}s
+- Estimated full-test provider runtime at current sequential settings: {estimated_runtime_seconds:.2f}s
 
 Runtime and rate limits:
 - Calls are sequential by default.
@@ -178,6 +212,9 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "fallback_used": False,
         "observed_provider": "unknown",
         "model_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
     }
     if not log_path.exists():
         return summary
@@ -192,9 +229,17 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         if record.get("event") == "run_started":
             providers = set()
             model_calls = 0
+            summary["prompt_tokens"] = 0
+            summary["completion_tokens"] = 0
+            summary["latency_ms"] = 0
             fallback_used = False
         if record.get("event") == "provider_fallback_used":
             fallback_used = True
+        if record.get("event") == "provider_error":
+            provider = str(record.get("provider") or "").strip().lower() or "unknown"
+            providers.add(provider)
+            if provider != "none":
+                model_calls += 1
         if record.get("event") == "provider_response":
             provider = str(record.get("provider") or "").strip().lower() or "unknown"
             providers.add(provider)
@@ -202,6 +247,9 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
                 fallback_used = True
             elif provider != "none" and record.get("cache_hit") is not True:
                 model_calls += 1
+                summary["prompt_tokens"] = int(summary["prompt_tokens"]) + int(record.get("prompt_tokens") or 0)
+                summary["completion_tokens"] = int(summary["completion_tokens"]) + int(record.get("completion_tokens") or 0)
+                summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
     observed_provider = "unknown"
     if len(providers) == 1:
         observed_provider = next(iter(providers))
@@ -260,6 +308,8 @@ def main() -> int:
     observed_provider = str(run_summary["observed_provider"])
     sample_model_calls = int(run_summary["model_calls"])
     test_model_calls = len(test_rows) if observed_provider not in {"none", "unknown"} else 0
+    input_price_per_million = float(os.environ.get("VLM_INPUT_PRICE_PER_MILLION", "0"))
+    output_price_per_million = float(os.environ.get("VLM_OUTPUT_PRICE_PER_MILLION", "0"))
     _write_report(
         report_path,
         metrics,
@@ -272,6 +322,11 @@ def main() -> int:
         fallback_used=cfg.provider == "none" or bool(run_summary["fallback_used"]),
         sample_model_calls=sample_model_calls,
         test_model_calls=test_model_calls,
+        sample_prompt_tokens=int(run_summary["prompt_tokens"]),
+        sample_completion_tokens=int(run_summary["completion_tokens"]),
+        sample_latency_ms=int(run_summary["latency_ms"]),
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
     )
 
     print(f"Wrote sample predictions to {sample_predictions_path}")

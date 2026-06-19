@@ -727,6 +727,11 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
         fallback_used=False,
         sample_model_calls=1,
         test_model_calls=1,
+        sample_prompt_tokens=1200,
+        sample_completion_tokens=200,
+        sample_latency_ms=2500,
+        input_price_per_million=1.0,
+        output_price_per_million=4.0,
     )
 
     report = report_path.read_text(encoding="utf-8")
@@ -735,6 +740,10 @@ def test_evaluation_report_distinguishes_fallback_allowed_from_used(tmp_path):
     assert "A configured VLM provider was used for image inspection." in report
     assert "With `VLM_PROVIDER=none` or no-vision fallback, images were not inspected" not in report
     assert "Model calls: 1" in report
+    assert "Observed prompt tokens: 1200" in report
+    assert "Observed output tokens: 200" in report
+    assert "Estimated full-test cost: $0.0020" in report
+    assert "Observed average latency per fresh call: 2.50s" in report
 
 
 def test_evaluation_report_uses_observed_provider_for_fallback_call_counts(tmp_path):
@@ -794,6 +803,40 @@ def test_latest_run_provider_summary_does_not_count_cache_hits_as_model_calls(tm
     assert summary["observed_provider"] == "openai"
     assert summary["fallback_used"] is False
     assert summary["model_calls"] == 0
+
+
+def test_latest_run_provider_summary_counts_failed_provider_attempts(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "run_started", "provider": "openai"}),
+                json.dumps(
+                    {
+                        "event": "provider_error",
+                        "provider": "openai",
+                        "error_category": "server_error",
+                        "retry_count": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "provider_response",
+                        "provider": "openai",
+                        "cache_hit": False,
+                        "used_fallback": False,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_run_provider_summary(log_path)
+
+    assert summary["observed_provider"] == "openai"
+    assert summary["fallback_used"] is False
+    assert summary["model_calls"] == 2
 
 
 def test_evaluation_report_describes_cache_only_provider_runs(tmp_path):
