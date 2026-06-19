@@ -9,16 +9,14 @@ from typing import Any
 SECRET_MARKERS = ("api_key", "authorization", "token", "secret", "cookie")
 IMAGE_PAYLOAD_MARKERS = ("data_base64", "base64", "image_payload", "image_bytes", "raw_image")
 MAX_STRING_LENGTH = 240
-IMAGE_DATA_URI_PATTERN = re.compile(r"data:image/[a-z0-9.+-]+;base64,", re.IGNORECASE)
+IMAGE_DATA_URI_PATTERN = re.compile(r"data:image(?:/[a-z0-9.+-]+)?;base64,", re.IGNORECASE)
 LIKELY_BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 
 def _looks_like_base64_payload(value: str) -> bool:
     if len(value) < MAX_STRING_LENGTH:
         return False
-    if not LIKELY_BASE64_PATTERN.fullmatch(value):
-        return False
-    return any(char.isupper() or char.isdigit() or char in "+/=" for char in value)
+    return bool(LIKELY_BASE64_PATTERN.fullmatch(value))
 
 
 def redact_value(value: Any) -> Any:

@@ -11,12 +11,15 @@ def test_redact_value_hides_obvious_secrets_and_truncates_long_strings():
     assert redact_value("sk-live-secret") == "[REDACTED]"
     assert redact_value("sk-ant-secret") == "[REDACTED]"
     assert redact_value("Bearer token-value") == "[REDACTED]"
-    assert redact_value("a" * 300) == ("a" * 240) + "..."
+    long_prose = ("This is ordinary prose, not a base64 payload. " * 8).strip()
+    assert redact_value(long_prose) == long_prose[:240] + "..."
 
 
 def test_redact_value_hides_generic_image_data_and_base64_payloads():
     assert redact_value("data:image/jpeg;base64," + ("a" * 300)) == "[REDACTED]"
+    assert redact_value("data:image;base64," + ("a" * 300)) == "[REDACTED]"
     assert redact_value("A" * 320) == "[REDACTED]"
+    assert redact_value("a" * 300) == "[REDACTED]"
 
 
 def test_jsonl_logger_writes_safe_events(tmp_path):
