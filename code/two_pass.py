@@ -548,7 +548,77 @@ def _json_error_from(result: ProviderResult, category: str = "json_parse_error")
         raw_json={"decision": {}},
         metadata=replace(result.metadata, error_category=category),
         used_fallback=result.used_fallback,
+        raw_text=result.raw_text,
     )
+
+
+def _stage_json_repair_prompt(context: PredictionContext, stage: str, raw_text: str) -> str:
+    return f"""
+Repair this {stage} provider output into the required final decision JSON schema.
+
+Rules:
+- Return JSON only.
+- Do not add visual facts that are not present in the provider output or row context.
+- If the decision cannot be recovered, use not_enough_information, unknown, false, and empty supporting_image_ids.
+
+Required output contract:
+{provider_json_contract()}
+
+Row context:
+{{
+  "row_index": {context.row_index},
+  "claim_object": {context.row.get("claim_object", "")!r},
+  "user_claim": {context.row.get("user_claim", "")!r},
+  "image_ids": {[image.image_id for image in context.prepared_images]!r}
+}}
+
+Provider output to repair:
+{raw_text[:12000]}
+""".strip()
+
+
+def _attempt_stage_json_repair(
+    *,
+    stage: str,
+    context: PredictionContext,
+    result: ProviderResult,
+    repair_call: Any,
+    validate: Any,
+    logger: Any,
+) -> ProviderResult | None:
+    raw_text = (result.raw_text or "").strip()
+    if result.metadata.error_category != "json_parse_error" or not raw_text or repair_call is None:
+        return None
+    if logger is not None:
+        logger.write(
+            "two_pass_stage_json_repair_scheduled",
+            row_index=context.row_index,
+            stage=stage,
+            provider=result.metadata.provider,
+            model=result.metadata.model,
+            source_error_category=result.metadata.error_category,
+        )
+    try:
+        repaired = repair_call(_stage_json_repair_prompt(context, stage, raw_text))
+    except Exception:
+        return None
+    if not repaired.metadata.error_category and not repaired.used_fallback and not validate(repaired.raw_json):
+        repaired = _json_error_from(repaired)
+    if logger is not None:
+        logger.write(
+            "two_pass_stage_json_repair_response",
+            row_index=context.row_index,
+            stage=stage,
+            provider=repaired.metadata.provider,
+            model=repaired.metadata.model,
+            error_category=repaired.metadata.error_category,
+            prompt_tokens=repaired.metadata.prompt_tokens,
+            completion_tokens=repaired.metadata.completion_tokens,
+            total_tokens=repaired.metadata.total_tokens,
+        )
+    if not repaired.metadata.error_category:
+        return repaired
+    return None
 
 
 def _call_stage_with_retries(
@@ -559,6 +629,7 @@ def _call_stage_with_retries(
     validate: Any,
     logger: Any,
     max_retries: int,
+    repair_call: Any = None,
 ) -> ProviderResult:
     last_result: ProviderResult | None = None
     for attempt in range(max(0, max_retries) + 1):
@@ -570,6 +641,17 @@ def _call_stage_with_retries(
         category = result.metadata.error_category
         if not category:
             return result
+        repaired = _attempt_stage_json_repair(
+            stage=stage,
+            context=context,
+            result=result,
+            repair_call=repair_call,
+            validate=validate,
+            logger=logger,
+        )
+        if repaired is not None:
+            _stage_log(logger, context, stage, repaired)
+            return repaired
         if category not in RETRYABLE_TWO_PASS_ERROR_CATEGORIES or attempt >= max_retries:
             return result
         if logger is not None:
@@ -660,6 +742,7 @@ def run_two_pass_review(
         stage="primary_decision",
         context=context,
         call=lambda: visual_provider.review_claim(context),
+        repair_call=(visual_provider.complete_json if hasattr(visual_provider, "complete_json") else None),
         validate=has_decision_payload,
         logger=logger,
         max_retries=max_retries,
@@ -682,6 +765,7 @@ def run_two_pass_review(
         stage="adjudicator",
         context=context,
         call=lambda: adjudicator_provider.complete_json(adjudicator_prompt),
+        repair_call=adjudicator_provider.complete_json,
         validate=has_decision_payload,
         logger=logger,
         max_retries=max_retries,

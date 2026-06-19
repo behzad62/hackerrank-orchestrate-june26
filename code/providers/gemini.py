@@ -173,6 +173,7 @@ class GeminiProvider:
         total_tokens = 0
         cached_tokens = 0
         finish_reason = ""
+        raw_text = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
@@ -210,11 +211,12 @@ class GeminiProvider:
                 for part in parts
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
-            parsed = extract_json_object(text)
+            raw_text = text
+            parsed = extract_json_object(raw_text)
             if not has_supported_json_payload(parsed):
                 raise ValueError("missing supported payload")
         except (ValueError, TypeError, json.JSONDecodeError):
-            return self._error_result(
+            result = self._error_result(
                 category="json_parse_error",
                 latency_ms=duration_ms,
                 http_status=response.status_code,
@@ -225,6 +227,7 @@ class GeminiProvider:
                 total_tokens=total_tokens,
                 cached_tokens=cached_tokens,
             )
+            return ProviderResult(raw_json=result.raw_json, metadata=result.metadata, raw_text=raw_text)
 
         return ProviderResult(
             raw_json=parsed,
@@ -288,6 +291,7 @@ class GeminiProvider:
         total_tokens = 0
         cached_tokens = 0
         finish_reason = ""
+        raw_text = ""
         try:
             data = response.json()
             if not isinstance(data, dict):
@@ -325,11 +329,12 @@ class GeminiProvider:
                 for part in parts
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
-            parsed = extract_json_object(text)
+            raw_text = text
+            parsed = extract_json_object(raw_text)
             if not has_decision_payload(parsed):
                 raise ValueError("missing decision payload")
         except (ValueError, TypeError, json.JSONDecodeError):
-            return self._error_result(
+            result = self._error_result(
                 category="json_parse_error",
                 latency_ms=duration_ms,
                 http_status=response.status_code,
@@ -340,6 +345,7 @@ class GeminiProvider:
                 total_tokens=total_tokens,
                 cached_tokens=cached_tokens,
             )
+            return ProviderResult(raw_json=result.raw_json, metadata=result.metadata, raw_text=raw_text)
 
         return ProviderResult(
             raw_json=parsed,

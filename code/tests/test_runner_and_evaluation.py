@@ -563,6 +563,133 @@ def test_run_predictions_retries_valid_json_without_decision_payload(monkeypatch
     assert '"error_category": "json_parse_error"' in log_text
 
 
+def test_run_predictions_repairs_json_parse_error_with_text_only_retry(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class RepairableProvider:
+        name = "openai"
+        model = "test-model"
+
+        def __init__(self):
+            self.review_calls = 0
+            self.repair_calls = 0
+
+        def review_claim(self, context):
+            self.review_calls += 1
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="openai",
+                    model="test-model",
+                    error_category="json_parse_error",
+                ),
+                raw_text="The screen is cracked. claim_status supported. image img_1.",
+            )
+
+        def complete_json(self, prompt):
+            self.repair_calls += 1
+            assert "Repair this provider output" in prompt
+            assert "The screen is cracked" in prompt
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openai", model="test-model"),
+            )
+
+    provider = RepairableProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: provider)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert provider.review_calls == 1
+    assert provider.repair_calls == 1
+    assert rows[0]["claim_status"] == "supported"
+    records = [
+        json.loads(line)
+        for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(record["event"] == "provider_json_repair_scheduled" for record in records)
+    assert any(record["event"] == "provider_json_repair_response" for record in records)
+
+
+def test_run_predictions_records_claim_failed_row_instead_of_aborting(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class BrokenProvider:
+        name = "openai"
+        model = "test-model"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="openai",
+                    model="test-model",
+                    error_category="json_parse_error",
+                ),
+                raw_text="not repairable",
+            )
+
+        def complete_json(self, prompt):
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="openai",
+                    model="test-model",
+                    error_category="json_parse_error",
+                ),
+                raw_text="still malformed",
+            )
+
+    provider = BrokenProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: provider)
+
+    rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert len(rows) == 1
+    assert rows[0]["claim_status"] == "not_enough_information"
+    assert rows[0]["risk_flags"] == "manual_review_required"
+    assert rows[0]["valid_image"] == "false"
+    records = [
+        json.loads(line)
+        for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(record["event"] == "claim_failed" and record["row_index"] == 1 for record in records)
+    run_completed = [record for record in records if record["event"] == "run_completed"][-1]
+    assert run_completed["rows_processed"] == 1
+    assert run_completed["failed_rows"] == 1
+    summary = _latest_run_provider_summary(paths.logs_dir / "run.jsonl")
+    assert summary["failed_rows"] == 1
+
+
 def test_cache_payload_rejects_json_without_decision_payload():
     assert not _cache_payload_is_trustworthy(
         {
@@ -1070,26 +1197,26 @@ def test_run_predictions_two_pass_uses_visual_pass_and_text_adjudicator(monkeypa
 
         def review_claim(self, context):
             self.review_calls += 1
-            assert "Pass 1 extracts visual facts only" in context.row["_prompt_override_static"]
             return ProviderResult(
                 raw_json={
-                    "image_observations": [
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 shows the cracked screen.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    },
+                    "visual_observations": [
                         {
                             "image_id": "img_1",
-                            "usable_for_review": True,
-                            "visible_object_type": "laptop",
-                            "visible_parts": ["screen"],
-                            "visible_damage": ["crack on screen"],
-                            "claimed_damage_visible": True,
-                            "relevant_part_visible": True,
+                            "visible_issues": ["crack"],
                         }
                     ],
-                    "overall_visual_facts": {
-                        "relevant_object_visible": True,
-                        "relevant_part_visible": True,
-                        "claimed_damage_visible": True,
-                        "visible_mismatch": False,
-                    },
                 },
                 metadata=ProviderMetadata(provider="openrouter", model="vision-model", prompt_tokens=100, completion_tokens=40),
             )
@@ -1104,7 +1231,7 @@ def test_run_predictions_two_pass_uses_visual_pass_and_text_adjudicator(monkeypa
         def complete_json(self, prompt):
             self.complete_calls += 1
             assert "Final text-only adjudication" in prompt
-            assert "visual_facts" in prompt
+            assert "primary_visual_decision_or_facts" in prompt
             return ProviderResult(
                 raw_json={
                     "decision": {
@@ -1143,7 +1270,7 @@ def test_run_predictions_two_pass_uses_visual_pass_and_text_adjudicator(monkeypa
         for line in (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     stage_events = [record for record in records if record["event"] == "two_pass_stage_response"]
-    assert [record["stage"] for record in stage_events] == ["visual_facts", "adjudicator"]
+    assert [record["stage"] for record in stage_events] == ["primary_decision", "adjudicator"]
     run_completed = [record for record in records if record["event"] == "run_completed"][-1]
     assert run_completed["provider_calls"] == 2
 
@@ -1759,6 +1886,61 @@ def test_latest_run_provider_summary_counts_failed_provider_attempts(tmp_path):
     assert summary["observed_provider"] == "openai"
     assert summary["fallback_used"] is False
     assert summary["model_calls"] == 2
+
+
+def test_latest_run_provider_summary_counts_json_repair_calls(tmp_path):
+    log_path = tmp_path / "run.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "run_started", "provider": "openai"}),
+                json.dumps(
+                    {
+                        "event": "provider_error",
+                        "row_index": 1,
+                        "provider": "openai",
+                        "model": "vision-model",
+                        "error_category": "json_parse_error",
+                        "retry_count": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "provider_json_repair_response",
+                        "row_index": 1,
+                        "provider": "openai",
+                        "model": "vision-model",
+                        "error_category": "",
+                        "prompt_tokens": 50,
+                        "completion_tokens": 10,
+                        "total_tokens": 60,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "provider_response",
+                        "row_index": 1,
+                        "provider": "openai",
+                        "model": "vision-model",
+                        "cache_hit": False,
+                        "used_fallback": False,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_run_provider_summary(log_path)
+
+    assert summary["model_calls"] == 2
+    assert summary["prompt_tokens"] == 50
+    assert summary["completion_tokens"] == 10
+    assert summary["calls_by_model"][("openai", "vision-model")] == {
+        "calls": 1,
+        "prompt_tokens": 50,
+        "completion_tokens": 10,
+    }
 
 
 def test_latest_run_provider_summary_counts_two_pass_stage_tokens(tmp_path):

@@ -117,6 +117,7 @@ def _write_report(
     primary_provider_calls: int = 0,
     backup_provider_calls: int = 0,
     fallback_rows: int = 0,
+    failed_rows: int = 0,
     max_concurrency: int = 1,
     rate_limit_waits: int = 0,
     run_total_duration_ms: int = 0,
@@ -261,6 +262,7 @@ Sample set:
 - Primary provider calls: {primary_provider_calls}
 - Backup provider calls: {backup_provider_calls}
 - Fallback rows: {fallback_rows}
+- Failed rows: {failed_rows}
 - Cache hits: {cache_hits}
 - Configured max concurrency: {max_concurrency}
 - Rate-limit waits: {rate_limit_waits}
@@ -388,10 +390,10 @@ def _format_backup_reason_lines(backup_reasons: dict[str, int]) -> str:
 
 def _format_strategy_table(results: list[StrategyResult]) -> str:
     header = (
-        "| Strategy | Mode | Vision Provider | Vision Model | Adjudicator | Fresh calls | Cache hits | Fallback rows | "
+        "| Strategy | Mode | Vision Provider | Vision Model | Adjudicator | Fresh calls | Cache hits | Fallback rows | Failed rows | "
         "claim_status | issue_type | object_part | severity | Risk F1 | Image ID F1 | Est. full-test cost |"
     )
-    separator = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    separator = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     rows = [header, separator]
     for result in results:
         accuracy = result.metrics.get("field_accuracy", {})
@@ -415,6 +417,7 @@ def _format_strategy_table(results: list[StrategyResult]) -> str:
                     str(int(summary.get("model_calls") or 0)),
                     str(int(summary.get("cache_hits") or 0)),
                     str(int(summary.get("fallback_rows") or 0)),
+                    str(int(summary.get("failed_rows") or 0)),
                     f"{float(accuracy.get('claim_status', 0.0)):.3f}",
                     f"{float(accuracy.get('issue_type', 0.0)):.3f}",
                     f"{float(accuracy.get('object_part', 0.0)):.3f}",
@@ -624,6 +627,7 @@ Sample set:
 - Fresh model calls: {int(final_summary.get('model_calls') or 0)}
 - Cache hits: {int(final_summary.get('cache_hits') or 0)}
 - Fallback rows: {int(final_summary.get('fallback_rows') or 0)}
+- Failed rows: {int(final_summary.get('failed_rows') or 0)}
 - Backup calls: {int(final_summary.get('backup_provider_calls') or 0)}
 - Prompt tokens: {token_estimate.sample_prompt_tokens}
 - Completion tokens: {token_estimate.sample_completion_tokens}
@@ -903,6 +907,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
         "primary_provider_calls": 0,
         "backup_provider_calls": 0,
         "fallback_rows": 0,
+        "failed_rows": 0,
         "max_concurrency": 1,
         "rate_limit_waits": 0,
         "run_total_duration_ms": 0,
@@ -916,11 +921,13 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     fallback_used = False
     primary_provider = "unknown"
     saw_two_pass_stage = False
+    repaired_rows: set[int] = set()
     calls_by_model: dict[tuple[str, str], dict[str, int]] = {}
     backup_reasons: dict[str, int] = {}
     primary_provider_calls = 0
     backup_provider_calls = 0
     fallback_rows = 0
+    failed_rows = 0
     rate_limit_waits = 0
     for line in log_path.read_text(encoding="utf-8").splitlines():
         try:
@@ -932,11 +939,13 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             model_calls = 0
             primary_provider = str(record.get("provider") or "unknown").strip().lower()
             saw_two_pass_stage = False
+            repaired_rows = set()
             calls_by_model = {}
             backup_reasons = {}
             primary_provider_calls = 0
             backup_provider_calls = 0
             fallback_rows = 0
+            failed_rows = 0
             rate_limit_waits = 0
             summary["prompt_tokens"] = 0
             summary["completion_tokens"] = 0
@@ -953,6 +962,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             summary["max_concurrency"] = int(record.get("max_concurrency") or 1)
             summary["run_total_duration_ms"] = int(record.get("total_duration_ms") or 0)
             summary["cache_hits"] = int(record.get("cache_hits") or 0)
+            failed_rows = int(record.get("failed_rows") or 0)
         if record.get("event") == "claim_completed":
             if record.get("backup_used") is True:
                 reason = str(record.get("backup_reason") or "unknown_provider_error")
@@ -989,6 +999,31 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
                 summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
                 if not record.get("error_category"):
                     summary["token_source"] = "fresh provider metadata"
+        if record.get("event") == "provider_json_repair_response":
+            provider = str(record.get("provider") or "").strip().lower() or "unknown"
+            model_name = str(record.get("model") or "").strip()
+            providers.add(provider)
+            try:
+                repaired_rows.add(int(record.get("row_index") or 0))
+            except (TypeError, ValueError):
+                pass
+            if provider != "none":
+                model_calls += 1
+                if provider == primary_provider:
+                    primary_provider_calls += 1
+                else:
+                    backup_provider_calls += 1
+                key = (provider, model_name)
+                if key not in calls_by_model:
+                    calls_by_model[key] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+                calls_by_model[key]["calls"] += 1
+                calls_by_model[key]["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
+                calls_by_model[key]["completion_tokens"] += int(record.get("completion_tokens") or 0)
+                summary["prompt_tokens"] = int(summary["prompt_tokens"]) + int(record.get("prompt_tokens") or 0)
+                summary["completion_tokens"] = int(summary["completion_tokens"]) + int(record.get("completion_tokens") or 0)
+                summary["latency_ms"] = int(summary["latency_ms"]) + int(record.get("duration_ms") or 0)
+                if int(record.get("prompt_tokens") or 0) or int(record.get("completion_tokens") or 0):
+                    summary["token_source"] = "fresh provider metadata"
         if record.get("event") == "provider_response":
             provider = str(record.get("provider") or "").strip().lower() or "unknown"
             model_name = str(record.get("model") or "").strip()
@@ -996,7 +1031,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
             if record.get("used_fallback") is True:
                 fallback_used = True
                 fallback_rows += 1
-            elif provider != "none" and not saw_two_pass_stage:
+            elif provider != "none" and not saw_two_pass_stage and int(record.get("row_index") or 0) not in repaired_rows:
                 is_cache_hit = record.get("cache_hit") is True
                 if not is_cache_hit:
                     model_calls += 1
@@ -1034,6 +1069,7 @@ def _latest_run_provider_summary(log_path: Path) -> dict[str, object]:
     summary["primary_provider_calls"] = primary_provider_calls
     summary["backup_provider_calls"] = backup_provider_calls
     summary["fallback_rows"] = fallback_rows
+    summary["failed_rows"] = failed_rows
     summary["rate_limit_waits"] = rate_limit_waits
     return summary
 

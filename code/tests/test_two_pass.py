@@ -168,22 +168,17 @@ def test_two_pass_retries_retryable_adjudicator_json_parse_error():
         def review_claim(self, context):
             return ProviderResult(
                 raw_json={
-                    "image_observations": [
-                        {
-                            "image_id": "img_1",
-                            "usable_for_review": True,
-                            "visible_object_type": "car",
-                            "visible_parts": ["front_bumper"],
-                            "visible_damage": ["scratch on front bumper"],
-                            "claimed_damage_visible": True,
-                            "relevant_part_visible": True,
-                        }
-                    ],
-                    "overall_visual_facts": {
-                        "relevant_object_visible": True,
-                        "relevant_part_visible": True,
-                        "claimed_damage_visible": True,
-                        "visible_mismatch": False,
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The front bumper is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "scratch",
+                        "object_part": "front_bumper",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 shows a scratch on the front bumper.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "low",
                     },
                 },
                 metadata=ProviderMetadata(provider="openrouter", model="vision-model"),

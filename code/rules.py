@@ -242,6 +242,10 @@ def _cleanup_flags_for_status(flags: list[str], claim_status: str, issue_type: s
             output.remove(flag)
             _append_repair(repairs, "risk_flags", flag, "removed", f"weak_{flag}_signal")
 
+    if _contains_any(_strip_flag_tokens(evidence_text), NON_ORIGINAL_WORDS) and "non_original_image" not in output:
+        output.append("non_original_image")
+        _append_repair(repairs, "risk_flags", "missing", "non_original_image", "non_original_image_signal")
+
     if claim_status == "supported":
         for flag in list(CONTRADICTION_NOISE_FLAGS):
             if flag in output and not _strong_quality_signal(flag, evidence_text):

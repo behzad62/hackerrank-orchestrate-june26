@@ -200,6 +200,7 @@ def test_openai_compatible_rejects_json_without_decision_payload(monkeypatch):
     assert result.metadata.error_category == "json_parse_error"
     assert result.raw_json == {"decision": {}}
     assert result.metadata.completion_tokens == 4
+    assert result.raw_text == '{"status":"ok"}'
 
 
 def test_openai_compatible_accepts_visual_fact_payload_for_custom_prompt(monkeypatch):

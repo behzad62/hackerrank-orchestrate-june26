@@ -16,7 +16,8 @@ from logging_config import JsonlLogger
 from normalization import normalize_provider_result
 from providers import AnthropicProvider, FallbackProvider, GeminiProvider, OpenAICompatibleProvider
 from providers.openai_compatible import has_decision_payload
-from schemas import AppPaths, PredictionContext, ProviderMetadata, ProviderResult
+from prompting import provider_json_contract
+from schemas import OUTPUT_COLUMNS, AppPaths, PredictionContext, ProviderMetadata, ProviderResult
 from security import detect_prompt_injection_flags
 from two_pass import run_two_pass_review
 
@@ -51,6 +52,7 @@ class RowResult:
     used_fallback: bool = False
     duration_ms: int = 0
     cache_hit: bool = False
+    failed: bool = False
 
 
 class ProviderLimiter:
@@ -202,6 +204,89 @@ def _sleep_seconds(attempt: int, max_sleep_seconds: int) -> int:
     return min(max(1, max_sleep_seconds), 2**attempt)
 
 
+def _json_repair_prompt(context: PredictionContext, raw_text: str) -> str:
+    return f"""
+Repair this provider output into the required JSON schema.
+
+Rules:
+- Return JSON only.
+- Do not add facts that are not present in the provider output or row context.
+- If a value cannot be recovered, use not_enough_information, unknown, false, or empty supporting_image_ids as appropriate.
+- Preserve image IDs only when they appear in the provider output or row image_ids.
+
+Required output contract:
+{provider_json_contract()}
+
+Row context:
+{{
+  "row_index": {context.row_index},
+  "user_id": {context.row.get("user_id", "")!r},
+  "claim_object": {context.row.get("claim_object", "")!r},
+  "user_claim": {context.row.get("user_claim", "")!r},
+  "image_ids": {[image.image_id for image in context.prepared_images]!r}
+}}
+
+Provider output to repair:
+{raw_text[:12000]}
+""".strip()
+
+
+def _attempt_json_repair(
+    *,
+    provider: Any,
+    context: PredictionContext,
+    result: ProviderResult,
+    logger: JsonlLogger,
+) -> ProviderResult | None:
+    raw_text = (result.raw_text or "").strip()
+    if result.metadata.error_category != "json_parse_error" or not raw_text or not hasattr(provider, "complete_json"):
+        return None
+    provider_name = result.metadata.provider or getattr(provider, "name", "")
+    model = result.metadata.model or getattr(provider, "model", "")
+    logger.write(
+        "provider_json_repair_scheduled",
+        row_index=context.row_index,
+        provider=provider_name,
+        model=model,
+        source_error_category=result.metadata.error_category,
+    )
+    try:
+        repaired = provider.complete_json(_json_repair_prompt(context, raw_text))
+    except Exception as exc:
+        repaired = ProviderResult(
+            raw_json={"decision": {}},
+            metadata=ProviderMetadata(
+                provider=provider_name,
+                model=model,
+                error_category=_exception_category(exc),
+            ),
+        )
+    if (
+        not repaired.metadata.error_category
+        and not repaired.used_fallback
+        and not has_decision_payload(repaired.raw_json)
+    ):
+        repaired = ProviderResult(
+            raw_json={"decision": {}},
+            metadata=replace(repaired.metadata, error_category="json_parse_error"),
+            used_fallback=repaired.used_fallback,
+            raw_text=repaired.raw_text,
+        )
+    logger.write(
+        "provider_json_repair_response",
+        row_index=context.row_index,
+        provider=repaired.metadata.provider or provider_name,
+        model=repaired.metadata.model or model,
+        error_category=repaired.metadata.error_category,
+        prompt_tokens=repaired.metadata.prompt_tokens,
+        completion_tokens=repaired.metadata.completion_tokens,
+        total_tokens=repaired.metadata.total_tokens,
+    )
+    if not repaired.metadata.error_category:
+        return repaired
+    return None
+
+
 def _effective_prompt_version(cfg: AppConfig) -> str:
     generation_settings = {
         "prompt_version": cfg.prompt_version,
@@ -261,6 +346,7 @@ def _call_with_retries(
                 raw_json={"decision": {}},
                 metadata=replace(result.metadata, error_category="json_parse_error"),
                 used_fallback=result.used_fallback,
+                raw_text=result.raw_text,
             )
 
         last_result = result
@@ -278,6 +364,9 @@ def _call_with_retries(
             http_status=result.metadata.http_status,
             finish_reason=result.metadata.finish_reason,
         )
+        repaired = _attempt_json_repair(provider=provider, context=context, result=result, logger=logger)
+        if repaired is not None:
+            return repaired
         if category not in RETRYABLE_ERROR_CATEGORIES or attempt >= cfg.max_retries:
             break
         sleep_seconds = _sleep_seconds(attempt, cfg.retry_max_sleep_seconds)
@@ -561,6 +650,58 @@ def _write_provider_response_log(
     )
 
 
+def _failed_output_row(row: dict[str, str], reason: str) -> dict[str, str]:
+    output = {
+        "user_id": row.get("user_id", ""),
+        "image_paths": row.get("image_paths", ""),
+        "user_claim": row.get("user_claim", ""),
+        "claim_object": row.get("claim_object", ""),
+        "evidence_standard_met": "false",
+        "evidence_standard_met_reason": f"Automated review failed for this row: {reason}.",
+        "risk_flags": "manual_review_required",
+        "issue_type": "unknown",
+        "object_part": "unknown",
+        "claim_status": "not_enough_information",
+        "claim_status_justification": "Provider/runtime failure prevented reliable automated review for this row.",
+        "supporting_image_ids": "none",
+        "valid_image": "false",
+        "severity": "unknown",
+    }
+    return {column: output.get(column, "") for column in OUTPUT_COLUMNS}
+
+
+def _failed_row_result(
+    *,
+    row_index: int,
+    row: dict[str, str],
+    logger: JsonlLogger,
+    exc: Exception,
+    started: float,
+) -> RowResult:
+    category = _exception_category(exc)
+    message = str(exc)
+    if "json_parse_error" in message:
+        category = "json_parse_error"
+    elif "rate_limited" in message:
+        category = "rate_limited"
+    elif "timeout" in message.lower():
+        category = "timeout"
+    logger.write(
+        "claim_failed",
+        row_index=row_index,
+        user_id=row.get("user_id", ""),
+        claim_object=row.get("claim_object", ""),
+        error_category=category,
+        safe_message=message[:240],
+    )
+    return RowResult(
+        row_index=row_index,
+        output_row=_failed_output_row(row, category),
+        duration_ms=int((time.monotonic() - started) * 1000),
+        failed=True,
+    )
+
+
 def process_claim_row(
     *,
     cfg: AppConfig,
@@ -774,25 +915,39 @@ def run_predictions(
     backup_semaphore = threading.BoundedSemaphore(max(1, cfg.backup_max_concurrency))
     worker_count = max(1, cfg.max_concurrency)
     if worker_count <= 1:
-        results = [
-            process_claim_row(
-                cfg=cfg,
-                row_index=row_index,
-                row=row,
-                user_history=user_history,
-                all_requirements=all_requirements,
-                logger=logger,
-                paths=paths,
-                provider_limiter=provider_limiter,
-                backup_semaphore=backup_semaphore,
-            )
-            for row_index, row in enumerate(claim_rows, start=1)
-        ]
+        results = []
+        for row_index, row in enumerate(claim_rows, start=1):
+            row_started = time.monotonic()
+            try:
+                results.append(
+                    process_claim_row(
+                        cfg=cfg,
+                        row_index=row_index,
+                        row=row,
+                        user_history=user_history,
+                        all_requirements=all_requirements,
+                        logger=logger,
+                        paths=paths,
+                        provider_limiter=provider_limiter,
+                        backup_semaphore=backup_semaphore,
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    _failed_row_result(
+                        row_index=row_index,
+                        row=row,
+                        logger=logger,
+                        exc=exc,
+                        started=row_started,
+                    )
+                )
     else:
         results = []
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(
+            futures = {}
+            for row_index, row in enumerate(claim_rows, start=1):
+                future = executor.submit(
                     process_claim_row,
                     cfg=cfg,
                     row_index=row_index,
@@ -804,10 +959,21 @@ def run_predictions(
                     provider_limiter=provider_limiter,
                     backup_semaphore=backup_semaphore,
                 )
-                for row_index, row in enumerate(claim_rows, start=1)
-            ]
+                futures[future] = (row_index, row, time.monotonic())
             for future in as_completed(futures):
-                results.append(future.result())
+                row_index, row, row_started = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    results.append(
+                        _failed_row_result(
+                            row_index=row_index,
+                            row=row,
+                            logger=logger,
+                            exc=exc,
+                            started=row_started,
+                        )
+                    )
 
     results.sort(key=lambda result: result.row_index)
     output_rows = [result.output_row for result in results]
@@ -821,6 +987,7 @@ def run_predictions(
         provider_calls=sum(result.provider_calls for result in results),
         backup_provider_calls=sum(1 for result in results if result.backup_used),
         fallback_rows=sum(1 for result in results if result.used_fallback),
+        failed_rows=sum(1 for result in results if result.failed),
         cache_hits=sum(1 for result in results if result.cache_hit),
         cache_misses=sum(1 for result in results if not result.cache_hit),
         total_duration_ms=int((time.monotonic() - started) * 1000),

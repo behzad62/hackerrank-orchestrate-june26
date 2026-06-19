@@ -169,6 +169,7 @@ class ProviderResult:
     raw_json: dict[str, Any]
     metadata: ProviderMetadata
     used_fallback: bool = False
+    raw_text: str = ""
 
 
 @dataclass
