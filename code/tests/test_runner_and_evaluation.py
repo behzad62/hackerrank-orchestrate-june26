@@ -34,6 +34,9 @@ def test_jsonl_logger_writes_safe_events(tmp_path):
     logger.write(
         "provider_response",
         provider="none",
+        prompt_tokens=12,
+        completion_tokens=5,
+        total_tokens=17,
         api_key="sk-hidden",
         headers={"Authorization": "Bearer hidden"},
         nested={"session_token": "secret-token"},
@@ -44,6 +47,9 @@ def test_jsonl_logger_writes_safe_events(tmp_path):
     record = json.loads((tmp_path / "run.jsonl").read_text(encoding="utf-8"))
     assert record["event"] == "provider_response"
     assert "timestamp" in record
+    assert record["prompt_tokens"] == 12
+    assert record["completion_tokens"] == 5
+    assert record["total_tokens"] == 17
     assert record["api_key"] == "[REDACTED]"
     assert record["headers"]["Authorization"] == "[REDACTED]"
     assert record["nested"]["session_token"] == "[REDACTED]"
@@ -377,6 +383,79 @@ def test_run_predictions_does_not_cache_fallback_after_provider_error(monkeypatc
     assert healthy_provider.calls == 1
     assert second_rows[0]["claim_status"] == "supported"
     assert len(list(paths.cache_dir.glob("*.json"))) == 1
+
+
+def test_run_predictions_ignores_legacy_fallback_cache_entry(monkeypatch, tmp_path):
+    write_task7_minimal_dataset(tmp_path)
+    paths = AppPaths.from_repo_root(tmp_path)
+    cfg = AppConfig(
+        provider="openai",
+        model="test-model",
+        max_retries=0,
+        allow_no_vision_fallback=False,
+        paths=paths,
+    )
+
+    class HealthyProvider:
+        name = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def review_claim(self, context):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The screen is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "crack",
+                        "object_part": "screen",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 supports the cracked screen claim.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "medium",
+                    }
+                },
+                metadata=ProviderMetadata(provider="openai", model="test-model"),
+            )
+
+    first_provider = HealthyProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: first_provider)
+    first_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+    assert first_rows[0]["claim_status"] == "supported"
+    [cache_file] = list(paths.cache_dir.glob("*.json"))
+    cache_file.write_text(
+        json.dumps(
+            {
+                "raw_json": {
+                    "decision": {
+                        "evidence_standard_met": False,
+                        "evidence_standard_met_reason": "No VLM provider was configured.",
+                        "risk_flags": ["manual_review_required"],
+                        "issue_type": "unknown",
+                        "object_part": "unknown",
+                        "claim_status": "not_enough_information",
+                        "claim_status_justification": "Images were not inspected.",
+                        "supporting_image_ids": [],
+                        "valid_image": False,
+                        "severity": "unknown",
+                    }
+                },
+                "metadata": {"provider": "openai", "model": "fallback"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    second_provider = HealthyProvider()
+    monkeypatch.setattr("runner.build_provider", lambda config: second_provider)
+    second_rows = run_predictions(cfg, claims_csv=paths.claims_csv, output_csv=paths.output_csv)
+
+    assert second_provider.calls == 1
+    assert second_rows[0]["claim_status"] == "supported"
 
 
 def test_run_predictions_uses_cache_for_successful_provider_result(monkeypatch, tmp_path):

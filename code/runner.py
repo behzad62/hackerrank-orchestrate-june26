@@ -15,7 +15,7 @@ from providers import AnthropicProvider, FallbackProvider, OpenAICompatibleProvi
 from schemas import PredictionContext, ProviderMetadata, ProviderResult
 from security import detect_prompt_injection_flags
 
-NORMALIZER_VERSION = "normalizer-v1"
+NORMALIZER_VERSION = "normalizer-v1-cache-policy-v2"
 RETRYABLE_ERROR_CATEGORIES = {
     "rate_limited",
     "timeout",
@@ -186,7 +186,13 @@ def _cache_payload_is_trustworthy(payload: dict[str, Any]) -> bool:
     if payload.get("used_fallback", False):
         return False
     metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and metadata.get("error_category"):
+    if not isinstance(metadata, dict):
+        return False
+    provider = str(metadata.get("provider") or "").strip().lower()
+    model = str(metadata.get("model") or "").strip().lower()
+    if metadata.get("error_category"):
+        return False
+    if provider == "none" or model == "fallback":
         return False
     return True
 
