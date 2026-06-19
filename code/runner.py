@@ -4,7 +4,7 @@ import threading
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from images import prepare_images
 from logging_config import JsonlLogger
 from normalization import normalize_provider_result
 from providers import AnthropicProvider, FallbackProvider, GeminiProvider, OpenAICompatibleProvider
+from providers.openai_compatible import has_decision_payload
 from schemas import AppPaths, PredictionContext, ProviderMetadata, ProviderResult
 from security import detect_prompt_injection_flags
 
@@ -247,6 +248,16 @@ def _call_with_retries(
                 raw_json={"decision": {}},
                 metadata=ProviderMetadata(provider=provider_name, model=cfg.model, error_category=category),
             )
+        if (
+            not result.metadata.error_category
+            and not result.used_fallback
+            and not has_decision_payload(result.raw_json)
+        ):
+            result = ProviderResult(
+                raw_json={"decision": {}},
+                metadata=replace(result.metadata, error_category="json_parse_error"),
+                used_fallback=result.used_fallback,
+            )
 
         last_result = result
         category = result.metadata.error_category
@@ -454,6 +465,9 @@ def _cache_payload_is_trustworthy(payload: dict[str, Any]) -> bool:
     if metadata.get("error_category"):
         return False
     if provider == "none" or model == "fallback":
+        return False
+    raw_json = payload.get("raw_json")
+    if not isinstance(raw_json, dict) or not has_decision_payload(raw_json):
         return False
     return True
 

@@ -265,7 +265,7 @@ def test_normalization_demotes_supported_when_evidence_not_met():
     }
 
 
-def test_normalization_demotes_contradicted_when_evidence_not_met():
+def test_normalization_keeps_contradicted_when_mismatch_evidence_is_present():
     context = PredictionContext(
         row_index=5,
         row={
@@ -278,12 +278,12 @@ def test_normalization_demotes_contradicted_when_evidence_not_met():
     raw = {
         "decision": {
             "evidence_standard_met": False,
-            "evidence_standard_met_reason": "The front bumper is not visible.",
-            "risk_flags": ["wrong_object_part"],
+            "evidence_standard_met_reason": "The uploaded image shows a different damaged part.",
+            "risk_flags": ["claim_mismatch", "wrong_object_part"],
             "issue_type": "scratch",
             "object_part": "front_bumper",
             "claim_status": "contradicted",
-            "claim_status_justification": "Provider mistakenly contradicted despite insufficient evidence.",
+            "claim_status_justification": "img_1 shows visible hood damage, not the claimed bumper scratch.",
             "supporting_image_ids": ["img_1"],
             "valid_image": True,
             "severity": "medium",
@@ -291,12 +291,8 @@ def test_normalization_demotes_contradicted_when_evidence_not_met():
     }
     result = ProviderResult(raw_json=raw, metadata=ProviderMetadata(provider="test", model="model"))
     row, repairs = normalize_provider_result(context, result)
-    assert row["evidence_standard_met"] == "false"
-    assert row["claim_status"] == "not_enough_information"
-    assert row["supporting_image_ids"] == "none"
-    assert row["severity"] == "unknown"
-    assert {repair["field"] for repair in repairs} >= {
-        "claim_status",
-        "supporting_image_ids",
-        "severity",
-    }
+    assert row["evidence_standard_met"] == "true"
+    assert row["claim_status"] == "contradicted"
+    assert row["supporting_image_ids"] == "img_1"
+    assert row["severity"] == "low"
+    assert not any(repair["reason"] == "evidence_standard_not_met" for repair in repairs)

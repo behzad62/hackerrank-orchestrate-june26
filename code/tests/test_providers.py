@@ -174,6 +174,34 @@ def test_openai_compatible_parses_prompt_cache_usage(monkeypatch):
     assert result.metadata.prompt_cache_key_used is True
 
 
+def test_openai_compatible_rejects_json_without_decision_payload(monkeypatch):
+    def fake_post(url, headers, json, timeout):
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"status":"ok"}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 4, "total_tokens": 104},
+            }
+        )
+
+    monkeypatch.setattr("providers.openai_compatible.requests.post", fake_post)
+    provider = OpenAICompatibleProvider(
+        provider="openrouter",
+        api_key="sk-test",
+        model="model",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    result = provider.review_claim(sample_context())
+
+    assert result.metadata.error_category == "json_parse_error"
+    assert result.raw_json == {"decision": {}}
+    assert result.metadata.completion_tokens == 4
+
+
 def test_openrouter_headers_are_included(monkeypatch):
     captured = {}
 
@@ -182,7 +210,7 @@ def test_openrouter_headers_are_included(monkeypatch):
         captured["json"] = json
         return FakeResponse(
             payload={
-                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{"claim_status":"supported"}}'}}],
                 "usage": {},
             }
         )
@@ -209,7 +237,7 @@ def test_openrouter_sends_unified_reasoning_config(monkeypatch):
         captured["json"] = json
         return FakeResponse(
             payload={
-                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{}}'}}],
+                "choices": [{"finish_reason": "stop", "message": {"content": '{"decision":{"claim_status":"supported"}}'}}],
                 "usage": {},
             }
         )

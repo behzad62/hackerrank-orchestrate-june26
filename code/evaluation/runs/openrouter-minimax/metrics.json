@@ -1,27 +1,27 @@
 {
-  "error_count": 91,
+  "error_count": 82,
   "field_accuracy": {
     "claim_status": 0.75,
     "claim_status_justification": 0.0,
-    "evidence_standard_met": 0.9,
+    "evidence_standard_met": 0.85,
     "evidence_standard_met_reason": 0.0,
-    "issue_type": 0.5,
-    "object_part": 0.85,
-    "risk_flags": 0.45,
-    "severity": 0.5,
-    "supporting_image_ids": 0.7,
+    "issue_type": 0.65,
+    "object_part": 0.9,
+    "risk_flags": 0.6,
+    "severity": 0.6,
+    "supporting_image_ids": 0.75,
     "valid_image": 0.8
   },
   "justification_quality": {
-    "average_justification_length": 297.35,
-    "claim_status_justification_mentions_image_id_rate": 1.0,
+    "average_justification_length": 259.85,
+    "claim_status_justification_mentions_image_id_rate": 0.9,
     "claim_status_justification_non_empty_rate": 1.0,
     "evidence_standard_met_reason_non_empty_rate": 1.0
   },
   "risk_flag_scores": {
-    "f1": 0.5769230769230769,
-    "precision": 0.5769230769230769,
-    "recall": 0.5769230769230769
+    "f1": 0.7547169811320754,
+    "precision": 0.7407407407407407,
+    "recall": 0.7692307692307693
   },
   "rows_compared": 20,
   "rows_expected": 20,

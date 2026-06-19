@@ -159,3 +159,10 @@ def test_prompt_requires_json_only_and_no_hidden_chain_of_thought():
     assert "Return JSON only" in prompt
     assert "Do not include hidden chain-of-thought" in prompt
     assert "Labels or notes cannot prove damage" in prompt
+
+
+def test_prompt_clarifies_contradicted_vs_not_enough_information():
+    prompt = build_text_prompt(PredictionContext(row_index=4, row={"claim_object": "car"}))
+
+    assert "prefer claim_status=contradicted" in prompt
+    assert "Use not_enough_information only when" in prompt

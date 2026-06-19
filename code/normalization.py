@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from rules import repair_normalized_decision
 from schemas import (
     ALLOWED_CLAIM_STATUS,
     ALLOWED_ISSUE_TYPES,
@@ -175,18 +176,7 @@ def normalize_provider_result(
         context.row.get("image_paths", ""),
     )
 
-    if issue_type == "none" and severity != "none":
-        repairs.append(
-            {
-                "field": "severity",
-                "original_value": severity,
-                "repaired_value": "none",
-                "reason": "issue_type_none",
-            }
-        )
-        severity = "none"
-
-    if not evidence_standard_met and claim_status != "not_enough_information":
+    if not evidence_standard_met and claim_status == "supported":
         repairs.append(
             {
                 "field": "claim_status",
@@ -234,6 +224,31 @@ def normalize_provider_result(
         _normalize_risk_flags(context.claim_text_risk_flags),
         _history_flags(context),
     )
+    available_image_ids = [image.image_id for image in context.prepared_images]
+    if not available_image_ids:
+        available_image_ids = [Path(part.strip()).stem for part in context.row.get("image_paths", "").split(";") if part.strip()]
+    repaired = repair_normalized_decision(
+        claim_object=claim_object,
+        issue_type=issue_type,
+        object_part=object_part,
+        claim_status=claim_status,
+        severity=severity,
+        risk_flags=risk_flags,
+        evidence_standard_met=evidence_standard_met,
+        valid_image=valid_image,
+        supporting_image_ids=supporting_image_ids,
+        available_image_ids=available_image_ids,
+        raw_decision=decision,
+        repairs=repairs,
+    )
+    issue_type = repaired.issue_type
+    object_part = repaired.object_part
+    claim_status = repaired.claim_status
+    severity = repaired.severity
+    risk_flags = repaired.risk_flags
+    evidence_standard_met = repaired.evidence_standard_met
+    valid_image = repaired.valid_image
+    supporting_image_ids = repaired.supporting_image_ids
 
     row = {
         "user_id": context.row.get("user_id", ""),
