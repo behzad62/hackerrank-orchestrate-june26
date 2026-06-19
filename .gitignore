@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.*.local
+
+.cache/
+logs/
+.pytest_cache/
+__pycache__/
+*.py[cod]
