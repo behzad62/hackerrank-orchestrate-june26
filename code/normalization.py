@@ -190,10 +190,14 @@ def normalize_provider_result(
         )
         evidence_standard_met = True
 
+    history_flags = _history_flags(context)
+    provider_risk_flags = _normalize_risk_flags(decision.get("risk_flags"))
+    if "user_history_risk" not in history_flags:
+        provider_risk_flags = [flag for flag in provider_risk_flags if flag != "user_history_risk"]
     risk_flags = merge_risk_flags(
-        _normalize_risk_flags(decision.get("risk_flags")),
+        provider_risk_flags,
         _normalize_risk_flags(context.claim_text_risk_flags),
-        _history_flags(context),
+        history_flags,
     )
     available_image_ids = [image.image_id for image in context.prepared_images]
     if not available_image_ids:

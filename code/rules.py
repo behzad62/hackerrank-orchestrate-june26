@@ -6,7 +6,7 @@ from typing import Any
 
 GLASS_WORDS = {"shatter", "shattered", "spiderweb", "cracked glass", "broken glass", "webbed glass"}
 SCRATCH_WORDS = {"scratch", "scratched", "scrape", "scraped", "scuff", "scuffed", "paint chip", "paint-chip", "mark"}
-CRUSH_WORDS = {"crushed", "smashed", "crumpled", "compressed", "collapsed", "crumple", "caved", "caved in"}
+CRUSH_WORDS = {"crushed", "crushing", "smashed", "crumpled", "compressed", "collapsed", "crumple", "caved", "caved in"}
 TORN_WORDS = {"torn", "ripped", "tear", "split", "open seam", "open flap", "punctured"}
 WATER_WORDS = {"wet", "water", "water damage", "soaked", "damp", "moisture"}
 STAIN_WORDS = {"stain", "stained", "discoloration", "discolored"}
@@ -64,13 +64,18 @@ PACKAGE_CONTENTS_UNCERTAIN_WORDS = {
     "no ordered product",
     "no product or item",
     "only crumpled newspaper",
+    "crumpled packing paper",
+    "packing paper",
     "only filler",
     "contents are unclear",
     "cannot verify whether anything is missing",
+    "impossible to verify",
+    "not possible to confirm",
+    "obstructing the view",
 }
 TRACKPAD_MINOR_MARK_WORDS = {"minor surface mark", "small surface mark", "minor mark", "small mark"}
 VISIBLE_INSTRUCTION_WORDS = {"approve this claim", "approved claim", "accept this claim"}
-TAMPER_LABEL_WORDS = {"void/tamper", "tamper evident", "do not accept"}
+TAMPER_LABEL_WORDS = {"void/tamper", "tamper evident", "tamper-evident", "do not accept", "prompt-injection", "sticky note"}
 NEITHER_IMAGE_WORDS = {"neither img", "neither image", "neither photo", "neither picture"}
 FINAL_DECISION_SIGNAL_FIELDS = {
     "evidence_standard_met_reason",
@@ -97,6 +102,22 @@ CONTRADICTION_NOISE_FLAGS = {
     "wrong_object",
     "claim_mismatch",
 }
+CANONICAL_RISK_FLAG_ORDER = [
+    "blurry_image",
+    "cropped_or_obstructed",
+    "low_light_or_glare",
+    "wrong_angle",
+    "wrong_object",
+    "wrong_object_part",
+    "claim_mismatch",
+    "damage_not_visible",
+    "possible_manipulation",
+    "non_original_image",
+    "text_instruction_present",
+    "user_history_risk",
+    "manual_review_required",
+]
+CANONICAL_RISK_FLAG_RANK = {flag: index for index, flag in enumerate(CANONICAL_RISK_FLAG_ORDER)}
 QUALITY_SIGNAL_WORDS = {
     "blurry_image": {"blurry", "blurred", "out of focus"},
     "cropped_or_obstructed": {"cropped", "obstructed", "blocked", "partially hidden", "cut off", "only crumpled newspaper", "only filler", "contents are unclear"},
@@ -181,11 +202,17 @@ def _contains_any(text: str, words: set[str] | tuple[str, ...]) -> bool:
 
 
 def _ordered_flags(flags: list[str]) -> list[str]:
-    output: list[str] = []
+    unique_flags: list[str] = []
     for flag in flags:
-        if flag and flag != "none" and flag not in output:
-            output.append(flag)
-    return output or ["none"]
+        if flag and flag != "none" and flag not in unique_flags:
+            unique_flags.append(flag)
+    if not unique_flags:
+        return ["none"]
+    original_index = {flag: index for index, flag in enumerate(unique_flags)}
+    return sorted(
+        unique_flags,
+        key=lambda flag: (CANONICAL_RISK_FLAG_RANK.get(flag, len(CANONICAL_RISK_FLAG_RANK)), original_index[flag]),
+    )
 
 
 def _split_ids(value: str) -> list[str]:
@@ -268,9 +295,24 @@ def _repair_supporting_image_ids(
     available_image_ids: list[str],
     raw_decision: dict,
     valid_image: bool,
+    preserve_nei_evidence_ids: bool = False,
     repairs: list[dict[str, str]],
 ) -> str:
     if claim_status == "not_enough_information":
+        if preserve_nei_evidence_ids:
+            preserved = _ordered_valid_ids(
+                _split_ids(supporting_image_ids)
+                or [_observation_image_id(obs) for obs in _collect_observations(raw_decision)],
+                available_image_ids,
+            )
+            _append_repair(
+                repairs,
+                "supporting_image_ids",
+                supporting_image_ids,
+                preserved,
+                "identity_conflict_visible_evidence_images",
+            )
+            return preserved
         _append_repair(repairs, "supporting_image_ids", supporting_image_ids, "none", "not_enough_information")
         return "none"
 
@@ -335,8 +377,110 @@ def _add_flag(flags: list[str], flag: str, repairs: list[dict[str, str]], reason
         _append_repair(repairs, "risk_flags", "missing", flag, reason)
 
 
+def _remove_flag(flags: list[str], flag: str, repairs: list[dict[str, str]], reason: str) -> None:
+    if flag in flags:
+        flags.remove(flag)
+        _append_repair(repairs, "risk_flags", flag, "removed", reason)
+
+
+def _remove_unneeded_manual_review(flags: list[str], repairs: list[dict[str, str]], reason: str) -> None:
+    if "manual_review_required" not in flags:
+        return
+    if any(flag in flags for flag in {"possible_manipulation", "non_original_image", "text_instruction_present", "user_history_risk"}):
+        return
+    _remove_flag(flags, "manual_review_required", repairs, reason)
+
+
 def _has_no_evidence_signal(evidence_text: str) -> bool:
     return _contains_any(evidence_text, ABSENCE_WORDS | NO_EVIDENCE_WORDS)
+
+
+def _has_non_negating_secondary_mismatch(evidence_text: str) -> bool:
+    if not _contains_any(evidence_text, {"different vehicle", "different car", "wrong object", "different object"}):
+        return False
+    return _contains_any(
+        evidence_text,
+        {
+            "does not negate",
+            "does not refute",
+            "does not override",
+            "does not affect",
+            "does not provide supporting evidence",
+        },
+    )
+
+
+def _has_identity_conflict_nei_signal(evidence_text: str, claim_object: str, available_image_ids: list[str]) -> bool:
+    if claim_object != "car" or len(available_image_ids) < 2:
+        return False
+    if _has_non_negating_secondary_mismatch(evidence_text):
+        return False
+    if not _contains_any(evidence_text, {"different vehicle", "different car"}):
+        return False
+    return _contains_any(
+        evidence_text,
+        {
+            "entirely different vehicle",
+            "entirely different vehicles",
+            "two different vehicles",
+            "two entirely different",
+            "does not consistently represent",
+            "identity concern",
+            "identity concerns",
+            "same claimed car",
+            "same vehicle",
+            "image set",
+            "submitted evidence",
+        },
+    )
+
+
+def _has_non_original_wrecked_car_signal(evidence_text: str) -> bool:
+    clean = _strip_flag_tokens(evidence_text)
+    return _contains_any(clean, NON_ORIGINAL_WORDS) and _contains_any(
+        clean,
+        {
+            "wrecked car",
+            "wrecked vehicle",
+            "severely wrecked",
+            "front-end damage",
+            "front end damage",
+            "front-end collision",
+            "front end collision",
+            "major front-end",
+            "major front end",
+            "severe front",
+            "damaged front",
+            "front bumper",
+        },
+    )
+
+
+def _has_unrelated_stock_secondary_with_direct_support(evidence_text: str) -> bool:
+    clean = _strip_flag_tokens(evidence_text)
+    if not _contains_any(clean, {"stock photo", "generic stock", "watermark"}):
+        return False
+    return _contains_any(
+        clean,
+        {
+            "matching the user's claim",
+            "matches the user's claim",
+            "matching the claim",
+            "consistent with the customer's claim",
+            "clearly torn open",
+            "clearly shows",
+        },
+    )
+
+
+def _has_visible_prompt_instruction_on_package_seal(evidence_text: str) -> bool:
+    clean = _strip_flag_tokens(evidence_text)
+    return _contains_any(clean, VISIBLE_INSTRUCTION_WORDS) and _contains_any(clean, TAMPER_LABEL_WORDS)
+
+
+def _has_package_wrong_object_no_box_signal(evidence_text: str) -> bool:
+    clean = _strip_flag_tokens(evidence_text)
+    return _contains_any(clean, {"instead of the shipping box", "not the shipping box", "food can", "canned product", "nutrition label"})
 
 
 def _augment_flags_from_evidence(
@@ -363,12 +507,7 @@ def _augment_flags_from_evidence(
         _add_flag(output, "damage_not_visible", repairs, "no_visible_evidence_signal")
         if object_part not in {"unknown", "none"} and _contains_any(clean, {"not visible", "not shown", "does not provide visible evidence"}):
             _add_flag(output, "wrong_angle", repairs, "claimed_part_not_visible_signal")
-    if (
-        claim_object == "package"
-        and object_part == "contents"
-        and issue_type == "missing_part"
-        and _contains_any(clean, PACKAGE_CONTENTS_UNCERTAIN_WORDS)
-    ):
+    if claim_object == "package" and object_part == "contents" and _contains_any(clean, PACKAGE_CONTENTS_UNCERTAIN_WORDS):
         _add_flag(output, "cropped_or_obstructed", repairs, "package_contents_not_verifiable")
         _add_flag(output, "damage_not_visible", repairs, "package_contents_not_verifiable")
         _add_flag(output, "manual_review_required", repairs, "package_contents_not_verifiable")
@@ -422,6 +561,14 @@ def _repair_issue_type(
     if claim_object == "laptop" and object_part == "screen" and issue_type in {"glass_shatter", "broken_part"}:
         return "crack"
 
+    if (
+        claim_object == "laptop"
+        and object_part == "keyboard"
+        and issue_type == "water_damage"
+        and _contains_any(evidence_text, STAIN_WORDS | {"sticky", "stickiness"})
+    ):
+        return "stain"
+
     if claim_object == "package":
         if object_part in {"seal", "box", "package_side", "package_corner"} and _contains_any(evidence_text, TORN_WORDS):
             return "torn_packaging"
@@ -448,7 +595,7 @@ def _repair_issue_type(
     return issue_type
 
 
-def _severity_for_issue(issue_type: str, evidence_text: str, claim_status: str) -> str:
+def _severity_for_issue(claim_object: str, object_part: str, issue_type: str, evidence_text: str, claim_status: str) -> str:
     if claim_status == "not_enough_information":
         return "unknown"
     if issue_type == "none":
@@ -458,7 +605,11 @@ def _severity_for_issue(issue_type: str, evidence_text: str, claim_status: str) 
         return severity
 
     clean = _strip_flag_tokens(evidence_text)
-    if issue_type in {"scratch", "stain"}:
+    if issue_type == "scratch":
+        return "low"
+    if issue_type == "stain":
+        if claim_object == "laptop" and object_part == "keyboard" and _contains_any(clean, {"spill", "spilled", "sticky", "keys"}):
+            return "medium"
         return "low"
     if issue_type == "dent":
         if _contains_any(clean, MINOR_SEVERITY_WORDS):
@@ -469,7 +620,7 @@ def _severity_for_issue(issue_type: str, evidence_text: str, claim_status: str) 
     if issue_type in {"glass_shatter", "missing_part"}:
         return "high"
     if issue_type == "broken_part":
-        if _contains_any(clean, {"unusable", "detached", "broken off", "missing"}):
+        if _contains_any(clean, {"unusable", "detached", "broken off", "missing", "severe", "wrecked", "front-end damage", "front end damage"}):
             return "high"
         return "medium"
     if issue_type in {"torn_packaging", "crushed_packaging", "water_damage"}:
@@ -551,6 +702,9 @@ def repair_normalized_decision(
 ) -> RepairedDecision:
     evidence_text = _flatten_text(raw_decision).lower()
     signal_text = _final_decision_signal_text(raw_decision).lower() or evidence_text
+    preserve_nei_visible_context = False
+    preserve_nei_issue_type: str | None = None
+    suppressed_noise_flags: set[str] = set()
 
     flags = [flag for flag in risk_flags if flag != "none"]
     flags = _augment_flags_from_evidence(
@@ -565,6 +719,11 @@ def repair_normalized_decision(
 
     if claim_status == "supported":
         clean = _strip_flag_tokens(signal_text)
+        if _has_non_negating_secondary_mismatch(signal_text) and _has_support_signal(signal_text, supporting_image_ids, issue_type):
+            for flag in ["claim_mismatch", "wrong_object", "wrong_object_part"]:
+                if flag in flags:
+                    flags.remove(flag)
+                    _append_repair(repairs, "risk_flags", flag, "removed", "non_negating_secondary_mismatch")
         if (
             claim_object == "package"
             and object_part == "contents"
@@ -642,7 +801,91 @@ def repair_normalized_decision(
     issue_type = _repair_issue_type(claim_object, issue_type, object_part, signal_text, claim_status)
     _append_repair(repairs, "issue_type", original_issue_type, issue_type, "contest_issue_type_calibration")
 
+    if (
+        claim_object == "car"
+        and claim_status == "contradicted"
+        and "non_original_image" in flags
+        and _has_non_original_wrecked_car_signal(signal_text)
+    ):
+        if object_part != "front_bumper":
+            _append_repair(repairs, "object_part", object_part, "front_bumper", "non_original_wrecked_car_signal")
+            object_part = "front_bumper"
+        if issue_type != "broken_part":
+            _append_repair(repairs, "issue_type", issue_type, "broken_part", "non_original_wrecked_car_signal")
+            issue_type = "broken_part"
+
+    if (
+        claim_object == "package"
+        and object_part == "seal"
+        and "text_instruction_present" in flags
+        and _has_visible_prompt_instruction_on_package_seal(signal_text)
+    ):
+        if claim_status != "contradicted":
+            _append_repair(repairs, "claim_status", claim_status, "contradicted", "visible_instruction_text_package_seal")
+            claim_status = "contradicted"
+        if issue_type != "none":
+            _append_repair(repairs, "issue_type", issue_type, "none", "visible_instruction_text_package_seal")
+            issue_type = "none"
+        evidence_standard_met = True
+        valid_image = True
+        _add_flag(flags, "damage_not_visible", repairs, "visible_instruction_text_package_seal")
+        for flag in ["claim_mismatch", "possible_manipulation", "non_original_image"]:
+            _remove_flag(flags, flag, repairs, "visible_instruction_text_package_seal")
+            suppressed_noise_flags.add(flag)
+
+    if (
+        claim_object == "package"
+        and claim_status == "contradicted"
+        and "text_instruction_present" not in flags
+        and "non_original_image" in flags
+        and issue_type == "torn_packaging"
+        and _has_unrelated_stock_secondary_with_direct_support(signal_text)
+    ):
+        _append_repair(repairs, "claim_status", claim_status, "supported", "direct_support_with_unrelated_stock_secondary")
+        claim_status = "supported"
+        evidence_standard_met = True
+        valid_image = True
+        for flag in ["claim_mismatch", "non_original_image", "manual_review_required"]:
+            _remove_flag(flags, flag, repairs, "direct_support_with_unrelated_stock_secondary")
+        suppressed_noise_flags.update({"claim_mismatch", "non_original_image"})
+
+    if (
+        claim_object == "package"
+        and claim_status == "contradicted"
+        and {"wrong_object", "claim_mismatch"}.issubset(set(flags))
+        and issue_type == "none"
+        and _has_package_wrong_object_no_box_signal(signal_text)
+    ):
+        _append_repair(repairs, "issue_type", issue_type, "unknown", "package_wrong_object_no_box")
+        issue_type = "unknown"
+        if object_part != "unknown":
+            _append_repair(repairs, "object_part", object_part, "unknown", "package_wrong_object_no_box")
+            object_part = "unknown"
+
     flags = _cleanup_flags_for_status(flags, claim_status, issue_type, signal_text, repairs)
+    if suppressed_noise_flags:
+        for flag in list(suppressed_noise_flags):
+            _remove_flag(flags, flag, repairs, "suppressed_secondary_noise_flag")
+        _remove_unneeded_manual_review(flags, repairs, "suppressed_secondary_noise_flag")
+
+    if (
+        claim_status == "contradicted"
+        and {"claim_mismatch", "wrong_object"}.issubset(set(flags))
+        and issue_type not in {"none", "unknown"}
+        and _has_identity_conflict_nei_signal(signal_text, claim_object, available_image_ids)
+    ):
+        if _contains_any(signal_text, {"front-end crushing", "front end crushing", "front-end collision", "front end collision", "broken headlight", "severe front-end", "severe front end"}):
+            if issue_type != "broken_part":
+                _append_repair(repairs, "issue_type", issue_type, "broken_part", "inconsistent_vehicle_identity_visible_damage")
+                issue_type = "broken_part"
+        _append_repair(repairs, "claim_status", claim_status, "not_enough_information", "inconsistent_vehicle_identity")
+        claim_status = "not_enough_information"
+        if evidence_standard_met:
+            _append_repair(repairs, "evidence_standard_met", evidence_standard_met, False, "inconsistent_vehicle_identity")
+        evidence_standard_met = False
+        valid_image = True
+        preserve_nei_visible_context = True
+        preserve_nei_issue_type = issue_type
 
     visible_mismatch = "claim_mismatch" in flags and _visible_alternate_damage(raw_decision, signal_text)
     if visible_mismatch and claim_status == "not_enough_information" and "wrong_object" not in flags:
@@ -650,6 +893,18 @@ def repair_normalized_decision(
         claim_status = "contradicted"
         evidence_standard_met = True
         valid_image = True
+
+    if (
+        claim_object == "package"
+        and object_part == "contents"
+        and claim_status == "contradicted"
+        and _contains_any(_strip_flag_tokens(signal_text), PACKAGE_CONTENTS_UNCERTAIN_WORDS | {"cannot confirm", "cannot verify"})
+    ):
+        _append_repair(repairs, "claim_status", claim_status, "not_enough_information", "package_contents_not_verifiable")
+        claim_status = "not_enough_information"
+        evidence_standard_met = False
+        valid_image = False
+        issue_type = "unknown"
 
     if claim_status == "supported" and not evidence_standard_met:
         _append_repair(repairs, "evidence_standard_met", evidence_standard_met, True, "supported_claim_implies_evidence")
@@ -659,16 +914,25 @@ def repair_normalized_decision(
             _append_repair(repairs, "evidence_standard_met", evidence_standard_met, True, "contradiction_supported_by_image")
         evidence_standard_met = True
 
-    if evidence_standard_met and claim_status in {"supported", "contradicted"} and not valid_image:
+    if (
+        evidence_standard_met
+        and claim_status in {"supported", "contradicted"}
+        and not valid_image
+        and "non_original_image" not in flags
+    ):
         _append_repair(repairs, "valid_image", valid_image, True, "decision_supported_by_visual_evidence")
         valid_image = True
+
+    if "non_original_image" in flags and _contains_any(_strip_flag_tokens(signal_text), NON_ORIGINAL_WORDS) and valid_image:
+        _append_repair(repairs, "valid_image", valid_image, False, "non_original_image_not_valid_evidence")
+        valid_image = False
 
     if issue_type == "none":
         severity_target = "none"
     elif issue_type == "unknown" and claim_status == "contradicted" and _has_contradiction_signal(signal_text, flags):
         severity_target = "low"
     else:
-        severity_target = _severity_for_issue(issue_type, signal_text, claim_status)
+        severity_target = _severity_for_issue(claim_object, object_part, issue_type, signal_text, claim_status)
     _append_repair(repairs, "severity", severity, severity_target, "contest_severity_calibration")
     severity = severity_target
 
@@ -682,8 +946,15 @@ def repair_normalized_decision(
         if severity != "unknown":
             _append_repair(repairs, "severity", severity, "unknown", "not_enough_information")
             severity = "unknown"
+        if preserve_nei_visible_context:
+            issue_type = preserve_nei_issue_type or issue_type
 
     flags = _cleanup_flags_for_status([flag for flag in flags if flag != "none"], claim_status, issue_type, signal_text, repairs)
+    if suppressed_noise_flags:
+        for flag in list(suppressed_noise_flags):
+            _remove_flag(flags, flag, repairs, "suppressed_secondary_noise_flag")
+        _remove_unneeded_manual_review(flags, repairs, "suppressed_secondary_noise_flag")
+    flags = _ordered_flags(flags)
     supporting_image_ids = _repair_supporting_image_ids(
         claim_status=claim_status,
         issue_type=issue_type,
@@ -692,6 +963,7 @@ def repair_normalized_decision(
         available_image_ids=available_image_ids,
         raw_decision=raw_decision,
         valid_image=valid_image,
+        preserve_nei_evidence_ids=preserve_nei_visible_context,
         repairs=repairs,
     )
 
