@@ -632,3 +632,195 @@ def test_package_wrong_object_with_no_claimed_box_damage_becomes_unknown_low():
         "user_history_risk",
         "manual_review_required",
     ]
+
+
+def test_package_contents_uncertainty_does_not_promote_nei_to_supported():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="not_enough_information",
+        issue_type="unknown",
+        object_part="contents",
+        severity="unknown",
+        risk_flags=["damage_not_visible", "manual_review_required"],
+        evidence_standard_met=False,
+        valid_image=False,
+        supporting_image_ids="img_1",
+        raw_decision={
+            "claim_status_justification": (
+                "img_1 clearly shows the box filled with crumpled packing paper that is "
+                "obstructing the view, so it is not possible to confirm whether contents are missing."
+            ),
+        },
+    )
+
+    assert repaired.claim_status == "not_enough_information"
+    assert repaired.issue_type == "unknown"
+    assert repaired.severity == "unknown"
+    assert repaired.evidence_standard_met is False
+    assert repaired.valid_image is False
+    assert repaired.supporting_image_ids == "none"
+    assert "cropped_or_obstructed" in repaired.risk_flags
+
+
+def test_prompt_injection_sticky_note_without_literal_instruction_invalidates_package_seal():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="supported",
+        issue_type="torn_packaging",
+        object_part="seal",
+        severity="medium",
+        risk_flags=["text_instruction_present", "non_original_image"],
+        supporting_image_ids="img_1;img_2",
+        raw_decision={
+            "claim_status_justification": (
+                "img_1 shows a cardboard box with torn tamper-evident tape and a prompt-injection "
+                "sticky note attached; img_2 is an undamaged stock photo."
+            ),
+        },
+    )
+
+    assert repaired.claim_status == "contradicted"
+    assert repaired.issue_type == "none"
+    assert repaired.severity == "none"
+    assert repaired.valid_image is True
+    assert "text_instruction_present" in repaired.risk_flags
+    assert "damage_not_visible" in repaired.risk_flags
+    assert "non_original_image" not in repaired.risk_flags
+
+
+def test_package_wrong_object_dented_metal_cans_becomes_unknown_low():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="contradicted",
+        issue_type="dent",
+        object_part="item",
+        severity="medium",
+        risk_flags=["wrong_object", "claim_mismatch", "user_history_risk"],
+        supporting_image_ids="img_1",
+        raw_decision={
+            "claim_status_justification": (
+                "The user claimed the outside shipping box was crushed, but img_1 shows dented "
+                "metal cans and does not show any shipping box."
+            ),
+        },
+    )
+
+    assert repaired.issue_type == "unknown"
+    assert repaired.object_part == "unknown"
+    assert repaired.severity == "low"
+    assert "manual_review_required" in repaired.risk_flags
+
+
+def test_minor_trackpad_scratch_does_not_support_physical_damage_claim():
+    repaired, _ = repair_case(
+        claim_object="laptop",
+        claim_status="supported",
+        issue_type="scratch",
+        object_part="trackpad",
+        severity="low",
+        raw_decision={
+            "claim_status_justification": "img_1 shows only a minor scratch on the lower edge of the trackpad.",
+        },
+    )
+
+    assert repaired.claim_status == "contradicted"
+    assert repaired.issue_type == "none"
+    assert repaired.severity == "none"
+    assert "damage_not_visible" in repaired.risk_flags
+
+
+def test_car_bumper_broken_part_with_dent_claim_maps_to_dent_medium():
+    repaired, _ = repair_case(
+        claim_object="car",
+        claim_status="supported",
+        issue_type="broken_part",
+        object_part="rear_bumper",
+        severity="high",
+        raw_decision={
+            "user_claim": "My rear bumper has a dent after the accident.",
+            "claim_status_justification": (
+                "img_1 clearly shows rear bumper deformation and a dented trunk area; "
+                "the bumper cover appears pushed in."
+            ),
+        },
+    )
+
+    assert repaired.issue_type == "dent"
+    assert repaired.severity == "medium"
+
+
+def test_laptop_keyboard_claimed_stain_overrides_water_damage_from_full_payload():
+    repaired, _ = repair_case(
+        claim_object="laptop",
+        claim_status="supported",
+        issue_type="water_damage",
+        object_part="keyboard",
+        severity="high",
+        raw_decision={
+            "user_claim": "There is a stain on the keyboard after a spill.",
+            "claim_status_justification": "img_1 shows water droplets across the keyboard and palm rest.",
+        },
+    )
+
+    assert repaired.issue_type == "stain"
+    assert repaired.severity == "medium"
+
+
+def test_primary_support_overrides_secondary_intact_windshield_conflict():
+    repaired, _ = repair_case(
+        claim_object="car",
+        claim_status="contradicted",
+        issue_type="glass_shatter",
+        object_part="windshield",
+        severity="high",
+        risk_flags=["claim_mismatch", "damage_not_visible", "manual_review_required"],
+        supporting_image_ids="img_1;img_2",
+        raw_decision={
+            "claim_status_justification": (
+                "img_1 directly shows a shattered windshield matching the user's claim. "
+                "img_2 shows an intact windshield, but it is a secondary view."
+            ),
+        },
+    )
+
+    assert repaired.claim_status == "supported"
+    assert repaired.issue_type == "glass_shatter"
+    assert repaired.severity == "high"
+    assert repaired.supporting_image_ids == "img_1"
+    assert "claim_mismatch" not in repaired.risk_flags
+    assert "damage_not_visible" not in repaired.risk_flags
+
+
+def test_nei_wrong_angle_removes_weak_wrong_object_part_flag():
+    repaired, _ = repair_case(
+        claim_object="car",
+        claim_status="not_enough_information",
+        issue_type="unknown",
+        object_part="headlight",
+        risk_flags=["wrong_angle", "wrong_object_part", "damage_not_visible"],
+        evidence_standard_met=False,
+        supporting_image_ids="none",
+        raw_decision={
+            "claim_status_justification": "The images show the side of the vehicle; the claimed headlight is not visible.",
+        },
+    )
+
+    assert repaired.claim_status == "not_enough_information"
+    assert "wrong_angle" in repaired.risk_flags
+    assert "damage_not_visible" in repaired.risk_flags
+    assert "wrong_object_part" not in repaired.risk_flags
+
+
+def test_package_water_damage_on_side_maps_box_to_package_side():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="supported",
+        issue_type="water_damage",
+        object_part="box",
+        severity="medium",
+        raw_decision={
+            "claim_status_justification": "img_1 shows a wet stain running down the side panel and corner of the package.",
+        },
+    )
+
+    assert repaired.object_part == "package_side"

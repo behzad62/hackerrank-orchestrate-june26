@@ -4,9 +4,9 @@
 
 | Strategy | Mode | Vision Provider | Vision Model | Adjudicator | Fresh calls | Cache hits | Fallback rows | Failed rows | claim_status | issue_type | object_part | severity | Risk F1 | Image ID F1 | Est. full-test cost |
 |---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| one-pass-minimax | one_pass | openrouter | minimax/minimax-m3 | same | 28 | 0 | 0 | 0 | 0.650 | 0.500 | 0.800 | 0.550 | 0.780 | 0.833 | $0.0779 |
-| two-pass-minimax | two_pass | openrouter | minimax/minimax-m3 | openrouter/minimax/minimax-m3 | 41 | 0 | 0 | 0 | 0.750 | 0.500 | 0.900 | 0.600 | 0.688 | 0.811 | $0.1760 |
-| two-pass-gemini-minimax | two_pass | openrouter | google/gemini-3.5-flash | openrouter/minimax/minimax-m3 | 40 | 0 | 0 | 0 | 0.700 | 0.650 | 0.900 | 0.650 | 0.746 | 0.976 | $0.9122 |
+| one-pass-minimax | one_pass | openrouter | minimax/minimax-m3 | same | 0 | 20 | 0 | 0 | 0.650 | 0.550 | 0.850 | 0.600 | 0.780 | 0.833 | $0.0823 |
+| two-pass-minimax | two_pass | openrouter | minimax/minimax-m3 | openrouter/minimax/minimax-m3 | 0 | 20 | 0 | 0 | 0.750 | 0.500 | 0.900 | 0.600 | 0.688 | 0.811 | $0.1720 |
+| two-pass-gemini-minimax | two_pass | openrouter | google/gemini-3.5-flash | openrouter/minimax/minimax-m3 | 0 | 20 | 0 | 0 | 0.850 | 0.950 | 1.000 | 0.900 | 0.862 | 1.000 | $0.1920 |
 
 
 ## Final Strategy Used For output.csv
@@ -29,42 +29,42 @@
 - Rows expected: 20
 - Rows predicted: 20
 - Rows compared: 20
-- Error count: 76
+- Error count: 51
 
 ### High-Value Field Accuracy
 
-- claim_status: 0.700
-- issue_type: 0.650
-- object_part: 0.900
-- evidence_standard_met: 0.900
-- valid_image: 0.900
-- severity: 0.650
+- claim_status: 0.850
+- issue_type: 0.950
+- object_part: 1.000
+- evidence_standard_met: 0.950
+- valid_image: 1.000
+- severity: 0.900
 
 ### All Evaluated Field Accuracy
 
-- evidence_standard_met: 0.900
+- evidence_standard_met: 0.950
 - evidence_standard_met_reason: 0.000
-- risk_flags: 0.550
-- issue_type: 0.650
-- object_part: 0.900
-- claim_status: 0.700
+- risk_flags: 0.800
+- issue_type: 0.950
+- object_part: 1.000
+- claim_status: 0.850
 - claim_status_justification: 0.000
-- supporting_image_ids: 0.950
-- valid_image: 0.900
-- severity: 0.650
+- supporting_image_ids: 1.000
+- valid_image: 1.000
+- severity: 0.900
 
 ### Risk Flags
 
-- Precision: 0.658
-- Recall: 0.862
-- F1: 0.746
+- Precision: 0.778
+- Recall: 0.966
+- F1: 0.862
 
 ### Supporting Image IDs
 
-- Set precision: 0.952
+- Set precision: 1.000
 - Set recall: 1.000
-- Set F1: 0.976
-- Average Jaccard overlap: 0.975
+- Set F1: 1.000
+- Average Jaccard overlap: 1.000
 
 ### Justification Quality
 
@@ -75,52 +75,33 @@
 
 ## Core Decision Error Analysis
 
-Core decision error count: 36
+Core decision error count: 11
 
 Core field errors:
-- risk_flags: 9
-- issue_type: 7
-- severity: 7
-- claim_status: 6
-- evidence_standard_met: 2
-- object_part: 2
-- valid_image: 2
-- supporting_image_ids: 1
+- risk_flags: 4
+- claim_status: 3
+- severity: 2
+- evidence_standard_met: 1
+- issue_type: 1
 
 Claim status mistakes:
-- expected `supported`, predicted `contradicted`: 3
-- expected `contradicted`, predicted `supported`: 1
-- expected `not_enough_information`, predicted `supported`: 1
+- expected `supported`, predicted `contradicted`: 2
 - expected `supported`, predicted `not_enough_information`: 1
 
 Issue type mistakes:
-- expected `dent`, predicted `broken_part`: 1
-- expected `none`, predicted `scratch`: 1
-- expected `none`, predicted `torn_packaging`: 1
 - expected `scratch`, predicted `dent`: 1
-- expected `stain`, predicted `water_damage`: 1
-- expected `unknown`, predicted `dent`: 1
-- expected `unknown`, predicted `missing_part`: 1
 
 Severity mistakes:
-- expected `low`, predicted `medium`: 2
-- expected `medium`, predicted `high`: 1
+- expected `low`, predicted `medium`: 1
 - expected `medium`, predicted `unknown`: 1
-- expected `none`, predicted `low`: 1
-- expected `none`, predicted `medium`: 1
-- expected `unknown`, predicted `high`: 1
 
 Risk flag false positives:
-- claim_mismatch: 5
-- damage_not_visible: 3
+- claim_mismatch: 3
+- damage_not_visible: 2
 - wrong_object: 2
 - manual_review_required: 1
-- non_original_image: 1
-- wrong_object_part: 1
 
 Risk flag false negatives:
-- damage_not_visible: 2
-- cropped_or_obstructed: 1
 - manual_review_required: 1
 
 ## Error Analysis
@@ -128,36 +109,33 @@ Risk flag false negatives:
 Top field errors:
 - claim_status_justification: 20
 - evidence_standard_met_reason: 20
-- risk_flags: 9
-- issue_type: 7
-- severity: 7
-- claim_status: 6
-- evidence_standard_met: 2
-- object_part: 2
-- valid_image: 2
-- supporting_image_ids: 1
+- risk_flags: 4
+- claim_status: 3
+- severity: 2
+- evidence_standard_met: 1
+- issue_type: 1
 
 Examples:
 - Row 1 `evidence_standard_met_reason`: expected `The rear bumper is visible and the dent can be verified from the submitted image.`, predicted `The rear of the vehicle is clearly visible, allowing for a complete assessment of the bumper and trunk area.`
-- Row 1 `issue_type`: expected `dent`, predicted `broken_part`
 - Row 1 `claim_status_justification`: expected `The image clearly shows a dent on the rear bumper and the user history does not add risk.`, predicted `Image img_1 shows severe damage to the rear of the vehicle, where the rear bumper cover is completely missing and the underlying bumper structure is heavily crushed and deformed.`
+- Row 2 `evidence_standard_met_reason`: expected `The close-up image shows front-end damage, but the full-view image appears to show a different car, so the image set does not satisfy vehicle identity evidence.`, predicted `The images show two completely different vehicles, allowing for a clear determination of a claim mismatch.`
 
 ## Operational Analysis
 
 Sample set:
 - Rows: 20
 - Images: 29
-- Fresh model calls: 40
-- Cache hits: 0
+- Fresh model calls: 0
+- Cache hits: 20
 - Fallback rows: 0
 - Failed rows: 0
 - Backup calls: 0
 - Prompt tokens: 143557
 - Completion tokens: 36847
 - Cached/read tokens: 35382
-- Cache write tokens: 0
-- Runtime: 247.07s
-- Average latency per token-baseline call: 15.05s
+- Cache write tokens: 2155
+- Runtime: 0.10s
+- Average latency per token-baseline call: 30.10s
 
 Backup reasons:
 - none
@@ -168,8 +146,8 @@ Test set:
 - Expected model calls: 44
 - Projected input tokens: 315825
 - Projected output tokens: 81063
-- Estimated full-test cost: $0.9122
-- Estimated full-test summed provider latency: 662.04s
+- Estimated full-test cost: $0.1920
+- Estimated full-test summed provider latency: 1324.19s
 
 Rate limits and operations:
 - Configured max concurrency: 3
@@ -183,16 +161,15 @@ Pricing assumptions:
 - Prices are read from `VLM_MODEL_PRICES` as `provider:model=input,output` in dollars per 1M tokens.
 - Missing provider/model prices are treated as $0 and explicitly warned about below.
 - Model-specific prices:
-- openrouter/google/gemini-3.5-flash: 20 calls, input $1.5000 / 1M, output $9.0000 / 1M
 - openrouter/minimax/minimax-m3: 20 calls, input $0.3000 / 1M, output $1.2000 / 1M
 - Price warnings:
 - none
 
 ## Caching Notes
 
-- Token source: fresh provider metadata
+- Token source: cached provider metadata
 - Prompt cache enabled: true
-- Response cache ignore mode: true
+- Response cache ignore mode: false
 - Response cache write enabled: true
 - If token source is approximate prompt-size estimate, input tokens are estimated from prompt characters and output tokens use the configured max-output budget as a conservative bound.
 - Image token usage: provider-specific or unavailable unless provider metadata includes it in prompt token accounting.

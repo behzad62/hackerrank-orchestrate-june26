@@ -202,6 +202,13 @@ def normalize_provider_result(
     available_image_ids = [image.image_id for image in context.prepared_images]
     if not available_image_ids:
         available_image_ids = [Path(part.strip()).stem for part in context.row.get("image_paths", "").split(";") if part.strip()]
+    rule_raw_decision = {
+        **result.raw_json,
+        "_claim_context": {
+            "user_claim": context.row.get("user_claim", ""),
+            "claim_object": claim_object,
+        },
+    }
     repaired = repair_normalized_decision(
         claim_object=claim_object,
         issue_type=issue_type,
@@ -213,7 +220,7 @@ def normalize_provider_result(
         valid_image=valid_image,
         supporting_image_ids=supporting_image_ids,
         available_image_ids=available_image_ids,
-        raw_decision=result.raw_json,
+        raw_decision=rule_raw_decision,
         repairs=repairs,
     )
     issue_type = repaired.issue_type

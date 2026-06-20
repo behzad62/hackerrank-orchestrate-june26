@@ -1,14 +1,14 @@
 {
-  "error_count": 98,
+  "error_count": 95,
   "field_accuracy": {
     "claim_status": 0.65,
     "claim_status_justification": 0.0,
     "evidence_standard_met": 0.75,
     "evidence_standard_met_reason": 0.0,
-    "issue_type": 0.5,
-    "object_part": 0.8,
+    "issue_type": 0.55,
+    "object_part": 0.85,
     "risk_flags": 0.5,
-    "severity": 0.55,
+    "severity": 0.6,
     "supporting_image_ids": 0.7,
     "valid_image": 0.65
   },
