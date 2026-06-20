@@ -3,6 +3,7 @@ from pathlib import Path
 from schemas import PreparedImage, PredictionContext
 from schemas import ProviderMetadata, ProviderResult
 from two_pass import (
+    _merge_candidate_and_adjudicator,
     build_adjudicator_prompt,
     build_candidate_decision_from_visual_facts,
     build_visual_fact_prompt_parts,
@@ -158,6 +159,148 @@ def test_adjudicator_prompt_includes_visual_facts_candidate_and_final_contract()
     assert "claim_status" in prompt
     assert "supported" in prompt
     assert "front bumper scratch" in prompt
+
+
+def test_two_pass_uses_candidate_repair_after_adjudicator_repair_retries_are_exhausted():
+    class ListLogger:
+        def __init__(self):
+            self.records = []
+
+        def write(self, event, **kwargs):
+            self.records.append({"event": event, **kwargs})
+
+    class VisualProvider:
+        name = "gemini"
+        model = "vision-model"
+
+        def review_claim(self, context):
+            return ProviderResult(
+                raw_json={
+                    "decision": {
+                        "evidence_standard_met": True,
+                        "evidence_standard_met_reason": "The front bumper is visible.",
+                        "risk_flags": ["none"],
+                        "issue_type": "scratch",
+                        "object_part": "front_bumper",
+                        "claim_status": "supported",
+                        "claim_status_justification": "img_1 shows a scratch on the front bumper.",
+                        "supporting_image_ids": ["img_1"],
+                        "valid_image": True,
+                        "severity": "low",
+                    },
+                },
+                metadata=ProviderMetadata(provider="gemini", model="vision-model"),
+            )
+
+    class AdjudicatorProvider:
+        name = "openrouter"
+        model = "adjudicator-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, prompt):
+            self.calls += 1
+            return ProviderResult(
+                raw_json={"decision": {}},
+                metadata=ProviderMetadata(
+                    provider="openrouter",
+                    model="adjudicator-model",
+                    error_category="json_parse_error",
+                ),
+                raw_text="{ malformed",
+            )
+
+    adjudicator = AdjudicatorProvider()
+    logger = ListLogger()
+
+    result = run_two_pass_review(
+        context=_context(),
+        visual_provider=VisualProvider(),
+        adjudicator_provider=adjudicator,
+        logger=logger,
+        max_retries=2,
+    )
+
+    assert adjudicator.calls == 6
+    assert result.metadata.error_category == ""
+    assert result.raw_json["decision"]["claim_status"] == "supported"
+    assert any(
+        record["event"] == "two_pass_stage_json_repair_response"
+        and record["stage"] == "adjudicator"
+        and record["provider"] == "local"
+        and record["model"] == "candidate-decision-repair"
+        and record["error_category"] == ""
+        for record in logger.records
+    )
+
+
+def test_two_pass_merge_allows_adjudicator_to_correct_soft_contradiction_with_image_ids():
+    candidate = {
+        "decision": {
+            "evidence_standard_met": True,
+            "risk_flags": ["claim_mismatch", "damage_not_visible"],
+            "issue_type": "none",
+            "object_part": "front_bumper",
+            "claim_status": "contradicted",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "none",
+        }
+    }
+    adjudicator = {
+        "decision": {
+            "evidence_standard_met": True,
+            "risk_flags": ["none"],
+            "issue_type": "scratch",
+            "object_part": "front_bumper",
+            "claim_status": "supported",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "low",
+        }
+    }
+
+    merged = _merge_candidate_and_adjudicator(_context(), {}, candidate, adjudicator)["decision"]
+
+    assert merged["claim_status"] == "supported"
+    assert merged["issue_type"] == "scratch"
+    assert merged["severity"] == "low"
+    assert "claim_mismatch" not in merged["risk_flags"]
+    assert "damage_not_visible" not in merged["risk_flags"]
+
+
+def test_two_pass_merge_preserves_hard_integrity_contradiction():
+    candidate = {
+        "decision": {
+            "evidence_standard_met": True,
+            "risk_flags": ["text_instruction_present", "possible_manipulation"],
+            "issue_type": "none",
+            "object_part": "front_bumper",
+            "claim_status": "contradicted",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "none",
+        }
+    }
+    adjudicator = {
+        "decision": {
+            "evidence_standard_met": True,
+            "risk_flags": ["none"],
+            "issue_type": "scratch",
+            "object_part": "front_bumper",
+            "claim_status": "supported",
+            "supporting_image_ids": ["img_1"],
+            "valid_image": True,
+            "severity": "low",
+        }
+    }
+
+    merged = _merge_candidate_and_adjudicator(_context(), {}, candidate, adjudicator)["decision"]
+
+    assert merged["claim_status"] == "contradicted"
+    assert "text_instruction_present" in merged["risk_flags"]
+    assert "possible_manipulation" in merged["risk_flags"]
 
 
 def test_two_pass_retries_retryable_adjudicator_json_parse_error():
