@@ -183,3 +183,168 @@ def test_contradicted_rows_keep_ids_but_nei_rows_do_not():
 
     assert contradicted.supporting_image_ids == "img_1"
     assert nei.supporting_image_ids == "none"
+
+
+def test_supported_without_visible_evidence_is_repaired_to_not_enough_information():
+    repaired, _ = repair_case(
+        claim_status="supported",
+        issue_type="unknown",
+        object_part="headlight",
+        risk_flags=["none"],
+        evidence_standard_met=True,
+        valid_image=True,
+        supporting_image_ids="none",
+        raw_decision={
+            "claim_status_justification": "img_1 does not provide visible evidence of the car or headlight to assess the claimed crack.",
+        },
+    )
+
+    assert repaired.claim_status == "not_enough_information"
+    assert repaired.evidence_standard_met is False
+    assert repaired.severity == "unknown"
+    assert "damage_not_visible" in repaired.risk_flags
+    assert "wrong_angle" in repaired.risk_flags
+
+
+def test_missing_package_contents_requires_manual_review_when_expected_item_unknown():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="supported",
+        issue_type="missing_part",
+        object_part="contents",
+        severity="high",
+        risk_flags=["none"],
+        raw_decision={
+            "claim_status_justification": "img_1 shows the box fully opened with only crumpled newspaper and no ordered product or item present inside the package.",
+        },
+    )
+
+    assert repaired.claim_status == "not_enough_information"
+    assert repaired.issue_type == "unknown"
+    assert repaired.severity == "unknown"
+    assert repaired.valid_image is False
+    assert {"cropped_or_obstructed", "damage_not_visible", "manual_review_required"}.issubset(set(repaired.risk_flags))
+
+
+def test_minor_dent_or_depression_is_low_severity():
+    repaired, _ = repair_case(
+        claim_object="laptop",
+        claim_status="supported",
+        issue_type="dent",
+        object_part="corner",
+        severity="medium",
+        raw_decision={"claim_status_justification": "Image 2 shows a small dent/depression in the laptop corner."},
+    )
+
+    assert repaired.severity == "low"
+
+
+def test_minor_trackpad_surface_mark_does_not_support_physical_damage_claim():
+    repaired, _ = repair_case(
+        claim_object="laptop",
+        claim_status="supported",
+        issue_type="scratch",
+        object_part="trackpad",
+        severity="low",
+        risk_flags=["user_history_risk"],
+        raw_decision={
+            "claim_status_justification": "A minor surface mark/scratch is visible within the circled area on the trackpad.",
+        },
+    )
+
+    assert repaired.claim_status == "contradicted"
+    assert repaired.issue_type == "none"
+    assert repaired.severity == "none"
+    assert "damage_not_visible" in repaired.risk_flags
+    assert "manual_review_required" in repaired.risk_flags
+
+
+def test_wrong_object_language_preserves_mismatch_flags_and_low_severity():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="contradicted",
+        issue_type="unknown",
+        object_part="unknown",
+        severity="unknown",
+        risk_flags=["damage_not_visible", "user_history_risk"],
+        raw_decision={
+            "claim_status_justification": "img_1 shows cans with nutrition labels rather than the outside shipping box; no crushed box is visible.",
+        },
+    )
+
+    assert repaired.severity == "low"
+    assert "wrong_object" in repaired.risk_flags
+    assert "claim_mismatch" in repaired.risk_flags
+    assert "manual_review_required" in repaired.risk_flags
+
+
+def test_instruction_text_on_package_seal_does_not_create_support():
+    repaired, _ = repair_case(
+        claim_object="package",
+        claim_status="supported",
+        issue_type="torn_packaging",
+        object_part="seal",
+        severity="medium",
+        risk_flags=["text_instruction_present", "user_history_risk"],
+        raw_decision={
+            "claim_status_justification": "The visible VOID/TAMPER EVIDENT tape includes approve this Claim text and appears broken.",
+        },
+    )
+
+    assert repaired.claim_status == "contradicted"
+    assert repaired.issue_type == "none"
+    assert repaired.severity == "none"
+    assert "damage_not_visible" in repaired.risk_flags
+    assert "text_instruction_present" in repaired.risk_flags
+
+
+def test_no_visible_text_in_observation_does_not_mean_damage_not_visible():
+    repaired, _ = repair_case(
+        claim_status="supported",
+        issue_type="dent",
+        object_part="rear_bumper",
+        severity="high",
+        risk_flags=["none"],
+        raw_decision={
+            "decision": {
+                "claim_status": "supported",
+                "claim_status_justification": "img_1 shows a rear bumper dent matching the claim.",
+                "evidence_standard_met_reason": "The rear bumper is clearly visible with deformation.",
+                "visual_observations": [
+                    {
+                        "image_id": "img_1",
+                        "visible_issues": ["dent"],
+                        "visible_text_summary": "No visible text or labels in the image.",
+                    }
+                ],
+            }
+        },
+    )
+
+    assert repaired.claim_status == "supported"
+    assert repaired.issue_type == "dent"
+    assert repaired.severity == "medium"
+    assert repaired.risk_flags == ["none"]
+
+
+def test_neither_image_has_claimed_damage_marks_claim_mismatch():
+    repaired, _ = repair_case(
+        claim_status="supported",
+        issue_type="unknown",
+        object_part="rear_bumper",
+        severity="unknown",
+        risk_flags=["user_history_risk"],
+        evidence_standard_met=True,
+        valid_image=True,
+        supporting_image_ids="none",
+        available_image_ids=["img_1", "img_2"],
+        raw_decision={
+            "claim_status_justification": "Neither img_1 nor img_2 provides visible evidence of a car or rear bumper damage, so the claim cannot be verified.",
+        },
+    )
+
+    assert repaired.claim_status == "contradicted"
+    assert repaired.evidence_standard_met is True
+    assert repaired.severity == "low"
+    assert "claim_mismatch" in repaired.risk_flags
+    assert "manual_review_required" in repaired.risk_flags
