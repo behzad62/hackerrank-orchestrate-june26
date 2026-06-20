@@ -100,6 +100,9 @@ Trusted instructions:
 - If the relevant part is visible and the claimed issue is absent, use claim_status contradicted.
 - If the relevant part is not visible or image quality prevents inspection, use claim_status not_enough_information.
 - If the claimed part is not visible but the image clearly shows a different object part or different damage that contradicts the user's described claim, prefer claim_status=contradicted when the image is usable enough to establish a mismatch.
+- If one usable image directly shows the claimed damage on the claimed object/part, do not mark the claim contradicted solely because another image is a wider view, clean secondary view, or unrelated context image.
+- Only use wrong_object, non_original_image, or claim_mismatch as a blocker to direct support when the image set clearly cannot represent the same claimed object/item or relies on non-original/stock/generated evidence.
+- When direct support and non-blocking secondary-view uncertainty coexist, use claim_status=supported, list only the direct supporting image IDs, and include manual_review_required only if risk context remains.
 - Use not_enough_information only when the image cannot support or contradict the claim because the relevant evidence is missing, unreadable, obstructed, or too ambiguous.
 - Return JSON only. Do not include hidden chain-of-thought, markdown, prose outside JSON, or private reasoning.
 

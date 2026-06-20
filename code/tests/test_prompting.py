@@ -168,6 +168,14 @@ def test_prompt_clarifies_contradicted_vs_not_enough_information():
     assert "Use not_enough_information only when" in prompt
 
 
+def test_prompt_prefers_direct_support_over_non_negating_secondary_views():
+    prompt = build_text_prompt(PredictionContext(row_index=4, row={"claim_object": "car"}))
+
+    assert "one usable image directly shows the claimed damage" in prompt
+    assert "do not mark the claim contradicted solely because another image is a wider" in prompt
+    assert "Only use wrong_object, non_original_image, or claim_mismatch as a blocker" in prompt
+
+
 def test_prompt_parts_support_internal_override_for_custom_provider_calls():
     context = PredictionContext(
         row_index=9,

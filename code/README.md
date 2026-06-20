@@ -16,39 +16,55 @@ python -m pip install -r code/requirements.txt
 
 ## Environment
 
+Create a local env file from the example, then fill in only the provider keys you plan to use:
+
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Bash:
+
 ```bash
-VLM_PROVIDER=openai|openrouter|anthropic|gemini|none
-VLM_MODEL=gpt-4.1-mini
-ALLOW_BACKUP_VLM=false
-VLM_BACKUP_CHAIN=openrouter:openai/gpt-4.1-mini,anthropic:claude-3-5-sonnet-latest
-OPENAI_API_KEY=sk-redacted
-OPENROUTER_API_KEY=sk-or-redacted
-ANTHROPIC_API_KEY=sk-ant-redacted
-GEMINI_API_KEY=redacted
+cp .env.example .env
+```
+
+Current example values:
+
+```bash
+VLM_PROVIDER=openrouter
+VLM_MODEL=google/gemini-3.5-flash
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+ALLOW_NO_VISION_FALLBACK=false
 VLM_TEMPERATURE=0
-VLM_MAX_RETRIES=2
-VLM_RETRY_MAX_SLEEP_SECONDS=8
-VLM_TIMEOUT_SECONDS=90
-VLM_MAX_OUTPUT_TOKENS=1800
-VLM_MAX_CONCURRENCY=1
-VLM_REQUESTS_PER_MINUTE=0
-VLM_BACKUP_MAX_CONCURRENCY=1
-VLM_CACHE_DIR=.cache/vlm
+VLM_MAX_RETRIES=3
+VLM_TIMEOUT_SECONDS=120
+VLM_MAX_OUTPUT_TOKENS=4096
+VLM_CACHE_DIR=.cache/vlm-gemini-3.5-flash-qwen-backup
 PROMPT_CACHE_ENABLED=true
 PROMPT_CACHE_RETENTION=24h
-VLM_REASONING_ENABLED=false
-VLM_REASONING_EFFORT=low
+VLM_RETRY_MAX_SLEEP_SECONDS=2
+VLM_MODEL_PRICES=gemini:gemini-3.5-flash=1.50,9.00;openrouter:qwen/qwen3.7-plus=0.32,1.28;openrouter:minimax/minimax-m3=0.30,1.20;openrouter:google/gemini-3.5-flash=1.50,9.00
+VLM_BACKUP_CHAIN=openrouter:minimax/minimax-m3
+ALLOW_BACKUP_VLM=true
 VLM_REASONING_MAX_TOKENS=0
+VLM_REASONING_ENABLED=true
+VLM_REASONING_EFFORT=high
 VLM_REASONING_EXCLUDE=true
+VLM_REQUESTS_PER_MINUTE=60
+VLM_MAX_CONCURRENCY=3
+VLM_BACKUP_MAX_CONCURRENCY=1
+EVAL_STRATEGIES=one-pass-minimax=openrouter:minimax/minimax-m3,mode=one_pass;two-pass-minimax=openrouter:minimax/minimax-m3,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3;two-pass-gemini-minimax=gemini:gemini-3.5-flash,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3
+FINAL_STRATEGY=one-pass-minimax
+EVAL_IGNORE_CACHE=false
+CACHE_WRITE_ENABLED=true
 CLAIM_REVIEW_STRATEGY_MODE=one_pass
 ADJUDICATOR_PROVIDER=
 ADJUDICATOR_MODEL=
-ALLOW_NO_VISION_FALLBACK=false
-VLM_MODEL_PRICES=gemini:gemini-3.5-flash=1.50,9.00;openrouter:minimax/minimax-m3=0.30,1.20
-EVAL_STRATEGIES=openrouter-minimax=openrouter:minimax/minimax-m3;two-pass-minimax=openrouter:minimax/minimax-m3,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3
-FINAL_STRATEGY=openrouter-minimax
-EVAL_IGNORE_CACHE=false
-CACHE_WRITE_ENABLED=true
 ```
 
 `none` is an honest no-vision fallback for smoke testing. It does not inspect images and returns conservative `not_enough_information` rows.
@@ -71,41 +87,66 @@ If Gemini returns a provider `bad_request` while reasoning controls are enabled,
 
 ## Run Final Predictions
 
+Use the configured `.env` provider/model:
+
 ```bash
-python code/main.py --claims dataset/claims.csv --output output.csv --provider openai --model gpt-4.1-mini
+python code/main.py --env .env --claims dataset/claims.csv --output output.csv
 ```
 
 PowerShell:
 
 ```powershell
-$env:VLM_PROVIDER='openai'
-$env:VLM_MODEL='gpt-4.1-mini'
-$env:ALLOW_NO_VISION_FALLBACK='false'
-python code/main.py
+python code\main.py --env .env --claims dataset\claims.csv --output output.csv
+```
+
+To reproduce the current `output.csv` candidate from the one-pass Minimax strategy, use explicit overrides so the command is independent of the scratch primary model in `.env`:
+
+```bash
+python code/main.py --env .env --claims dataset/claims.csv --output output.csv --provider openrouter --model minimax/minimax-m3 --strategy-mode one_pass --no-fallback --ignore-cache
+```
+
+PowerShell:
+
+```powershell
+python code\main.py --env .env --claims dataset\claims.csv --output output.csv --provider openrouter --model minimax/minimax-m3 --strategy-mode one_pass --no-fallback --ignore-cache
 ```
 
 ## Run Evaluation
 
+Run the strategy comparison configured in `.env`:
+
 ```bash
-python code/evaluation/main.py
+python code/evaluation/main.py --env .env --no-fallback
 ```
 
-Fresh two-strategy evaluation:
+PowerShell:
 
-```bash
-python code/evaluation/main.py --env .env --ignore-cache --strategy openrouter-minimax=openrouter:minimax/minimax-m3 --strategy none-fallback=none:none --final-strategy openrouter-minimax --no-fallback
+```powershell
+python code\evaluation\main.py --env .env --no-fallback
 ```
 
-Fresh Minimax vs Gemini evaluation:
+Fresh no-cache evaluation using the configured strategies:
 
 ```bash
-python code/evaluation/main.py --env .env --ignore-cache --strategy openrouter-minimax=openrouter:minimax/minimax-m3 --strategy gemini-flash=gemini:gemini-3.5-flash --final-strategy openrouter-minimax --no-fallback
+python code/evaluation/main.py --env .env --ignore-cache --no-fallback
 ```
 
-Cached repeat evaluation:
+PowerShell:
+
+```powershell
+python code\evaluation\main.py --env .env --ignore-cache --no-fallback
+```
+
+Run an explicit one-pass vs two-pass comparison without relying on `EVAL_STRATEGIES`:
 
 ```bash
-python code/evaluation/main.py --env .env --strategy openrouter-minimax=openrouter:minimax/minimax-m3 --strategy none-fallback=none:none --final-strategy openrouter-minimax --no-fallback
+python code/evaluation/main.py --env .env --ignore-cache --strategy one-pass-minimax=openrouter:minimax/minimax-m3,mode=one_pass --strategy two-pass-minimax=openrouter:minimax/minimax-m3,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3 --strategy two-pass-gemini-minimax=gemini:gemini-3.5-flash,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3 --final-strategy one-pass-minimax --no-fallback
+```
+
+PowerShell:
+
+```powershell
+python code\evaluation\main.py --env .env --ignore-cache --strategy "one-pass-minimax=openrouter:minimax/minimax-m3,mode=one_pass" --strategy "two-pass-minimax=openrouter:minimax/minimax-m3,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3" --strategy "two-pass-gemini-minimax=gemini:gemini-3.5-flash,mode=two_pass,adjudicator=openrouter:minimax/minimax-m3" --final-strategy one-pass-minimax --no-fallback
 ```
 
 Outputs:
